@@ -189,4 +189,36 @@ describe("indexed turn-request lookup", () => {
     bumpThreadEventRewriteGeneration(thread.id);
     expect(getStoredTurnRequestEventForTurn(db, args)?.sequence).toBe(3);
   });
+
+  it("finds a request written at a reused sequence after a history rewrite", () => {
+    const { db, newThread } = setup();
+    const thread = newThread();
+    insertEvents(db, noopNotifier, [
+      ...turnEvents(thread.id, 1, 1),
+      ...turnEvents(thread.id, 2, 3),
+    ]);
+    const second = { threadId: thread.id, turnId: "turn-2" };
+    expect(getStoredTurnRequestEventForTurn(db, second)?.sequence).toBe(3);
+
+    db.$client
+      .prepare("DELETE FROM events WHERE thread_id = ? AND sequence >= 3")
+      .run(thread.id);
+    bumpThreadEventRewriteGeneration(thread.id);
+    insertEvents(db, noopNotifier, turnEvents(thread.id, 3, 3));
+
+    const third = { threadId: thread.id, turnId: "turn-3" };
+    expect(getStoredTurnRequestEventForTurn(db, third)).toEqual(
+      getStoredTurnRequestEventForTurnUncached(db, third),
+    );
+    expect(getStoredTurnRequestEventForTurn(db, third)?.sequence).toBe(3);
+    expect(getStoredTurnRequestEventForTurn(db, second)).toBeNull();
+    expect(
+      getStoredTurnRequestEventForTurn(db, { threadId: thread.id, turnId: "turn-1" }),
+    ).toEqual(
+      getStoredTurnRequestEventForTurnUncached(db, {
+        threadId: thread.id,
+        turnId: "turn-1",
+      }),
+    );
+  });
 });

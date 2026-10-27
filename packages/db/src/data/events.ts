@@ -1914,7 +1914,6 @@ export function listStoredClientTurnRequestIdsInRange(
 }
 
 interface TurnRequestIndex {
-  generation: number;
   lastSequence: number;
   sequenceByRequestId: Map<string, number>;
 }
@@ -1924,20 +1923,18 @@ const turnRequestIndexes = new WeakMap<
   Map<string, TurnRequestIndex>
 >();
 
-function findTurnRequestSequence(
+function getTurnRequestIndex(
   db: DbQueryConnection,
   threadId: string,
-  requestId: string,
-): number | undefined {
+): TurnRequestIndex {
   let indexes = turnRequestIndexes.get(db);
   if (indexes === undefined) {
     indexes = new Map();
     turnRequestIndexes.set(db, indexes);
   }
-  const generation = getThreadEventRewriteGeneration(threadId);
   let index = indexes.get(threadId);
-  if (index === undefined || index.generation !== generation) {
-    index = { generation, lastSequence: -1, sequenceByRequestId: new Map() };
+  if (index === undefined) {
+    index = { lastSequence: -1, sequenceByRequestId: new Map() };
     indexes.set(threadId, index);
   }
   const rows = db
@@ -1964,7 +1961,7 @@ function findTurnRequestSequence(
     }
     index.lastSequence = row.sequence;
   }
-  return index.sequenceByRequestId.get(requestId);
+  return index;
 }
 
 export function getStoredTurnRequestEventForTurn(
@@ -1973,29 +1970,33 @@ export function getStoredTurnRequestEventForTurn(
 ): StoredTurnRequestEventRow | null {
   const requestId = getAcceptedClientRequestId(db, args);
   if (requestId === null) return null;
-  const sequence = findTurnRequestSequence(db, args.threadId, requestId);
-  if (sequence === undefined) return null;
-  const verified = db
-    .select({
-      data: events.data,
-      sequence: events.sequence,
-      threadId: events.threadId,
-      type: events.type,
-    })
-    .from(events)
-    .where(
-      and(
-        eq(events.threadId, args.threadId),
-        eq(events.sequence, sequence),
-        eq(events.type, "client/turn/requested"),
-        sql`json_extract(${events.data}, '$.requestId') = ${requestId}`,
-      ),
-    )
-    .limit(1)
-    .get();
-  if (verified !== undefined) return verified;
-  turnRequestIndexes.get(db)?.delete(args.threadId);
-  return getStoredTurnRequestEventForTurnUncached(db, args);
+  const index = getTurnRequestIndex(db, args.threadId);
+  const sequence = index.sequenceByRequestId.get(requestId);
+  if (sequence !== undefined) {
+    const verified = db
+      .select({
+        data: events.data,
+        sequence: events.sequence,
+        threadId: events.threadId,
+        type: events.type,
+      })
+      .from(events)
+      .where(
+        and(
+          eq(events.threadId, args.threadId),
+          eq(events.sequence, sequence),
+          eq(events.type, "client/turn/requested"),
+          sql`json_extract(${events.data}, '$.requestId') = ${requestId}`,
+        ),
+      )
+      .limit(1)
+      .get();
+    if (verified !== undefined) return verified;
+    index.sequenceByRequestId.delete(requestId);
+  }
+  const found = getStoredTurnRequestEventForTurnUncached(db, args);
+  if (found !== null) index.sequenceByRequestId.set(requestId, found.sequence);
+  return found;
 }
 
 function getAcceptedClientRequestId(
