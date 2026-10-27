@@ -1,5 +1,9 @@
 import { extractThreadContextWindowUsage } from "@bb/thread-view";
 import {
+  buildThreadTimelineOffThread,
+  readConversationOutlineOffThread,
+} from "../../services/threads/off-thread-reads.js";
+import {
   getAppSettings,
   getDatabaseDataVersion,
   getThreadPluginMetadata,
@@ -7,6 +11,7 @@ import {
   getLatestCompletedThreadContextClearSequence,
   listContextWindowUsageRows,
   getLatestThreadSequence,
+  getThreadEventRewriteGeneration,
   getLatestStoredConversationOutlineSequence,
   listQueuedThreadMessages,
 } from "@bb/db";
@@ -157,6 +162,9 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     ThreadConversationOutlineResponse["items"]
   >();
   const CONVERSATION_OUTLINE_CACHE_MAX_ENTRIES = 128;
+  const offThreadTarget = deps.db.$client.memory
+    ? null
+    : { databasePath: deps.db.$client.name, logger: deps.logger };
   const resolveConversationRowsOptions = (thread: Thread) => {
     const providerDisplayName = resolveThreadProviderDisplayName(
       deps,
@@ -239,7 +247,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     });
   });
 
-  get(routes.timeline, (context, query) => {
+  get(routes.timeline, async (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
     return context.json(
       timelineWindows.read(
@@ -255,8 +263,20 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     );
   });
 
-  get(routes.conversationOutline, (context, query) => {
+  get(routes.conversationOutline, async (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
+    if (offThreadTarget !== null && query.role === undefined) {
+      const { maxSeq: _maxSeq, ...outlineOptions } =
+        resolveConversationRowsOptions(thread);
+      const body = await readConversationOutlineOffThread(offThreadTarget, {
+        threadId: thread.id,
+        rewriteGeneration: getThreadEventRewriteGeneration(thread.id),
+        outlineOptions,
+      });
+      if (body !== null) {
+        return context.body(body, 200, { "Content-Type": "application/json" });
+      }
+    }
     const selectItems = (items: ThreadConversationOutlineResponse["items"]) =>
       query.role === undefined
         ? items

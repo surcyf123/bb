@@ -11,6 +11,7 @@ interface ThreadTimelineCacheOptions {
 }
 
 interface ThreadTimelineCache {
+  get(key: string): ThreadTimelineResponse | undefined;
   getOrBuild(
     threadId: string,
     key: string,
@@ -33,13 +34,20 @@ export function createThreadTimelineCache(
     options.maxCacheableRows ?? DEFAULT_MAX_CACHEABLE_ROWS;
   const entries = new Map<string, ThreadTimelineCacheEntry>();
 
+  const touch = (key: string): ThreadTimelineResponse | undefined => {
+    const cached = entries.get(key);
+    if (cached === undefined) return undefined;
+    entries.delete(key);
+    entries.set(key, cached);
+    return cached.response;
+  };
+
   return {
+    get: touch,
     getOrBuild(threadId, key, build) {
-      const cached = entries.get(key);
+      const cached = touch(key);
       if (cached !== undefined) {
-        entries.delete(key);
-        entries.set(key, cached);
-        return cached.response;
+        return cached;
       }
 
       const value = build();

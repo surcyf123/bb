@@ -13,6 +13,13 @@ export function bumpThreadEventRewriteGeneration(threadId: string): void {
   );
 }
 
+export function syncThreadEventRewriteGeneration(
+  threadId: string,
+  generation: number,
+): void {
+  generationsByThreadId.set(threadId, generation);
+}
+
 export function getDatabaseDataVersion(db: DbConnection): number {
   const version: unknown = db.$client.pragma("data_version", { simple: true });
   if (typeof version !== "number") {

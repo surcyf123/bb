@@ -36,6 +36,7 @@ import { createLauncherChannel } from "./services/system/launcher-channel.js";
 import { createBbAppManagedConfigReloader } from "./services/system/bb-app-managed-config.js";
 import { startGatedPerformanceDiagnostics } from "./services/system/performance-diagnostics.js";
 import { startEventLoopStallMonitor } from "./services/system/event-loop-stall-monitor.js";
+import { startBackgroundWalCheckpointer } from "./services/system/wal-checkpointer.js";
 import {
   runPeriodicSweeps,
   runStartupRecoverySweep,
@@ -130,6 +131,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   setOutlineCacheSlowWriteReporter((write) =>
     logger.warn(write, "Slow conversation outline cache write"),
   );
+  startBackgroundWalCheckpointer(db, logger);
   const serverImport = await applyServerImportAtBoot({
     dataDir: serverConfig.BB_DATA_DIR,
     db,
