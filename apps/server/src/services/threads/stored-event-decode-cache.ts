@@ -25,6 +25,16 @@ export const STORED_EVENT_DECODE_CACHE_MAX_DATA_CHARS = 8_000_000;
 
 const decodeCaches = new WeakMap<DbConnection, StoredEventDecodeCache>();
 let freezeDecodedEvents = false;
+let maxEntries = STORED_EVENT_DECODE_CACHE_MAX_ENTRIES;
+let maxDataChars = STORED_EVENT_DECODE_CACHE_MAX_DATA_CHARS;
+
+export function setStoredEventDecodeCacheLimits(limits: {
+  maxEntries: number;
+  maxDataChars: number;
+}): void {
+  maxEntries = limits.maxEntries;
+  maxDataChars = limits.maxDataChars;
+}
 
 export function setStoredEventDecodeCacheFreezeForTesting(
   enabled: boolean,
@@ -94,8 +104,8 @@ function rememberEntry(
   rowId: string,
   entry: StoredEventDecodeEntry,
 ): void {
-  const generationEntryLimit = STORED_EVENT_DECODE_CACHE_MAX_ENTRIES / 2;
-  const generationDataCharLimit = STORED_EVENT_DECODE_CACHE_MAX_DATA_CHARS / 2;
+  const generationEntryLimit = maxEntries / 2;
+  const generationDataCharLimit = maxDataChars / 2;
   if (entry.data.length > generationDataCharLimit) {
     return;
   }

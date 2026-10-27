@@ -7,6 +7,7 @@ import { isLoopbackHostname } from "@bb/config/loopback";
 import { toOptionalString } from "@bb/config/strings";
 import { createLogger } from "@bb/logger";
 import {
+  recoverQueueCutover,
   getAppSettings,
   getDisabledProviderIds,
   listRunningThreads,
@@ -25,6 +26,7 @@ import { createAppVersionService } from "./services/system/app-version.js";
 import { createLauncherChannel } from "./services/system/launcher-channel.js";
 import { createBbAppManagedConfigReloader } from "./services/system/bb-app-managed-config.js";
 import { startEventLoopStallMonitor } from "./services/system/event-loop-stall-monitor.js";
+import { startBackgroundWalCheckpointer } from "./services/system/wal-checkpointer.js";
 import {
   runPeriodicSweeps,
   runStartupRecoverySweep,
@@ -111,6 +113,12 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     dataDir: serverConfig.BB_DATA_DIR,
     logger,
   });
+  startBackgroundWalCheckpointer(db, logger);
+  const queueCutover = recoverQueueCutover(db);
+  if (queueCutover.phase === "held" || queueCutover.phase === "retry") {
+    logger.error({ queueCutover }, "Queue cutover requires reconciliation; source event range remains durable");
+  }
+
   const serverImport = await applyServerImportAtBoot({
     dataDir: serverConfig.BB_DATA_DIR,
     db,

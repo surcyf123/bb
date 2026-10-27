@@ -22,6 +22,8 @@ import type { TunnelClientLogger } from "./logger.js";
 const HEARTBEAT_INTERVAL_MS = 20_000;
 const HEARTBEAT_DEADLINE_MS = 60_000;
 const HEARTBEAT_LATE_TICK_MS = HEARTBEAT_INTERVAL_MS + 5_000;
+const SEND_HIGH_WATER_BYTES = 1024 * 1024;
+const SEND_DRAIN_POLL_MS = 10;
 
 const UNREGISTERED_PORT_BODY = "this port is not shared";
 const textEncoder = new TextEncoder();
@@ -49,6 +51,7 @@ export function requestOriginHttp(
 ): Promise<IncomingMessage> {
   const request = args.url.protocol === "https:" ? httpsRequest : httpRequest;
   const options: RequestOptions = {
+    agent: false,
     headers: frameBodyHeaders(args.headers, args.body),
     method: args.method,
     signal: args.signal,
@@ -336,6 +339,7 @@ export class TunnelSession {
           chunk instanceof Uint8Array ? chunk : Buffer.from(String(chunk));
         responseBytes += value.byteLength;
         for (const frame of chunkBody(streamId, value)) this.send(frame);
+        await this.waitForSendCapacity(stream.abort.signal);
       }
       this.send({ type: "body-end", streamId });
       if (initialThreadLoad) {
@@ -367,6 +371,17 @@ export class TunnelSession {
       }
     } finally {
       this.httpStreams.delete(streamId);
+    }
+  }
+
+  private async waitForSendCapacity(signal: AbortSignal): Promise<void> {
+    const { tunnel } = this.options;
+    while (
+      tunnel.bufferedAmount > SEND_HIGH_WATER_BYTES &&
+      tunnel.readyState === NodeWebSocket.OPEN &&
+      !signal.aborted
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, SEND_DRAIN_POLL_MS));
     }
   }
 

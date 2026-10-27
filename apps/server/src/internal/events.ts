@@ -216,6 +216,8 @@ interface ResolveActivePruneCandidatesArgs {
 }
 
 interface AddParentTurnNotificationFollowUpArgs {
+  sourceKey?: string;
+  sourceTurnId?: string;
   failedParentNotificationThreadIds: Set<string>;
   followUps: EventEffectFollowUp[];
   thread: NonNullable<ReturnType<typeof getThread>>;
@@ -224,6 +226,8 @@ interface AddParentTurnNotificationFollowUpArgs {
 }
 
 interface ParentTurnNotificationFollowUp {
+  sourceKey?: string;
+  sourceTurnId?: string;
   kind: "parent-turn-notification";
   childThreadId: string;
   projectId: string;
@@ -371,6 +375,8 @@ function addParentTurnNotificationFollowUp(
   }
   args.followUps.push({
     kind: "parent-turn-notification",
+    sourceKey: args.sourceKey,
+    sourceTurnId: args.sourceTurnId,
     childThreadId: args.thread.id,
     projectId: args.thread.projectId,
     parentThreadId: args.thread.parentThreadId,
@@ -464,6 +470,8 @@ async function applyEventEffects(
               }));
           if (!alreadyHandledByCommandFailure && !manuallyStopped) {
             addParentTurnNotificationFollowUp({
+              sourceTurnId: turnId,
+              sourceKey: `${turnCompleted.thread.parentThreadId}:${turnCompleted.thread.id}:${turnId}:${event.status}`,
               failedParentNotificationThreadIds,
               followUps,
               thread: turnCompleted.thread,
@@ -533,6 +541,8 @@ async function executeEventFollowUpBestEffort(
     switch (followUp.kind) {
       case "parent-turn-notification":
         await queueChildThreadTurnNotificationBestEffort(deps, {
+          sourceKey: followUp.sourceKey,
+          sourceTurnId: followUp.sourceTurnId,
           childThread: {
             id: followUp.childThreadId,
             projectId: followUp.projectId,

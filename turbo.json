@@ -456,6 +456,14 @@
       ],
       "outputs": ["src/generated/bb-official-marketplace/marketplace.json"]
     },
+    "@bb/tunnel-client#topo": {
+      "dependsOn": ["^topo", "@bb/tunnel-client#generate:worker"]
+    },
+    "@bb/tunnel-client#generate:worker": {
+      "dependsOn": ["^topo"],
+      "inputs": ["scripts/generate-worker-source.mjs", "src/**", "!src/generated/**"],
+      "outputs": ["src/generated/tunnel-worker-source.generated.ts"]
+    },
     "@bb/templates#generate:templates": {
       "dependsOn": [],
       "inputs": [

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { threadScope, type PromptInput } from "@bb/domain";
 import { noopNotifier } from "../../src/notifier.js";
-import { insertEvents } from "../../src/data/events.js";
+import { getLatestThreadSequence, insertEvents } from "../../src/data/events.js";
 import {
   claimNextQueuedThreadMessageGroup,
   claimQueuedThreadMessageGroup,
@@ -787,7 +787,7 @@ describe("queued thread messages", () => {
     insertEvents(db, noopNotifier, [
       {
         threadId: thread.id,
-        sequence: 1,
+        sequence: getLatestThreadSequence(db, { threadId: thread.id }) + 1,
         type: "system/thread/interrupted",
         scope: threadScope(),
         itemId: null,
@@ -854,7 +854,7 @@ describe("queued thread messages", () => {
     insertEvents(db, noopNotifier, [
       {
         threadId: thread.id,
-        sequence: 1,
+        sequence: getLatestThreadSequence(db, { threadId: thread.id }) + 1,
         type: "system/thread/interrupted",
         scope: threadScope(),
         itemId: null,
@@ -909,7 +909,7 @@ describe("queued thread messages", () => {
     insertEvents(db, noopNotifier, [
       {
         threadId: thread.id,
-        sequence: 1,
+        sequence: getLatestThreadSequence(db, { threadId: thread.id }) + 1,
         type: "system/thread/interrupted",
         scope: threadScope(),
         itemId: null,

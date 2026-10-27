@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { advanceThreadPruning } from "../src/data/thread-pruning.js";
 import {
   findEnvironmentPathClaim,
@@ -29,6 +30,9 @@ import {
   listActiveBackgroundTaskCountsByThreadIds,
   listItemEventSpansByItems,
   listOpenTurnInputAcceptedRowsByThreadIds,
+  listOpenBackgroundTaskItemRowsForHost,
+  listOpenBackgroundTaskItemRowsForThread,
+  listStoredClientTurnRequestRowsByKeys,
   listLatestThreadStateEventRowsByThreadIds,
   listLatestOpenBackgroundTaskStateRowsForThread,
   listStoredConversationOutlineEventRows,
@@ -36,6 +40,8 @@ import {
   listStoredEventRowsByParentToolCallIds,
   listStoredTurnCompletedKeys,
   listTodoSnapshotEventRowsForThread,
+  pruneContextWindowUsageEventsInTransaction,
+  pruneTokenUsageEventsInTransaction,
 } from "../src/data/events.js";
 import {
   MAX_COMPLETED_EVENT_OUTPUT_MIGRATION_EVENT_DATA_BYTES,
@@ -329,6 +335,66 @@ describe("slow query index plans", () => {
     } finally {
       db.$client.close();
     }
+  });
+
+  it("seeks client request IDs without decoding unrelated request payloads", () => {
+    const { db, thread, project } = setup();
+    try {
+      const other = createThread(db, noopNotifier, { projectId: project.id, providerId: "codex" });
+      insertEvents(db, noopNotifier, [thread, other].flatMap((target) =>
+        Array.from({ length: 100 }, (_, index) => ({
+          data: JSON.stringify({ requestId: index === 4 ? "creq_23456789aa" : `unrelated-${index}` }),
+          itemId: null, itemKind: null, parentToolCallId: null,
+          scope: turnScope("request-turn"), sequence: index + 1, threadId: target.id,
+          type: "client/turn/requested" as const,
+        })),
+      ));
+      db.$client.exec("ANALYZE");
+      const captured = captureStatements(db, () => {
+        const rows = listStoredClientTurnRequestRowsByKeys(db, { keys: [
+          { threadId: thread.id, requestId: "creq_23456789aa" },
+          { threadId: other.id, requestId: "creq_23456789aa" },
+        ] });
+        expect(rows).toHaveLength(2);
+        expect(rows.every((row) => row.sequence === 5)).toBe(true);
+        expect(new Set(rows.map((row) => row.threadId))).toEqual(new Set([thread.id, other.id]));
+      });
+      expect(captured).toHaveLength(1);
+      const plan = queryPlanDetails({ db, ...captured[0]! });
+      expect(plan).toContain("client_turn_request_lookup_key_idx");
+      expect(plan).toContain("request_id=?");
+      expect(plan).not.toContain("SCAN events");
+    } finally { db.$client.close(); }
+  });
+
+  it("keeps the request lookup consistent across edits, duplicates, deletion and rollback", () => {
+    const { db, thread } = setup();
+    try {
+      const insert = db.$client.prepare(`INSERT INTO events
+        (id,thread_id,scope_kind,sequence,type,data,created_at)
+        VALUES (?,?,'thread',?,'client/turn/requested',?,0)`);
+      const requested = (requestId: string) => listStoredClientTurnRequestRowsByKeys(db, {
+        keys: [{ threadId: thread.id, requestId: requestId as "creq_23456789aa" }],
+      }).map((row) => row.sequence);
+      insert.run("lookup-a", thread.id, 1, JSON.stringify({ requestId: "creq_23456789aa" }));
+      insert.run("lookup-b", thread.id, 2, JSON.stringify({ requestId: "creq_23456789aa" }));
+      expect(requested("creq_23456789aa")).toEqual([1, 2]);
+      db.$client.prepare("UPDATE events SET data=? WHERE id=?")
+        .run(JSON.stringify({ requestId: "creq_23456789ab" }), "lookup-a");
+      expect(requested("creq_23456789aa")).toEqual([2]);
+      expect(requested("creq_23456789ab")).toEqual([1]);
+      expect(() => db.transaction((tx) => {
+        tx.run(sql`DELETE FROM events WHERE id = 'lookup-b'`);
+        expect(requested("creq_23456789aa")).toEqual([]);
+        throw new Error("rollback lookup deletion");
+      })).toThrow("rollback lookup deletion");
+      expect(requested("creq_23456789aa")).toEqual([2]);
+      db.$client.prepare("UPDATE events SET type='thread/identity' WHERE id=?").run("lookup-a");
+      expect(requested("creq_23456789ab")).toEqual([]);
+      db.$client.prepare("DELETE FROM events WHERE id=?").run("lookup-b");
+      expect(requested("creq_23456789aa")).toEqual([]);
+      expect(db.$client.prepare("SELECT count(*) AS n FROM client_turn_request_lookup").get()).toEqual({ n: 0 });
+    } finally { db.$client.close(); }
   });
 
   it("seeks accepted inputs past each thread's latest interruption", () => {
@@ -766,6 +832,23 @@ describe("slow query index plans", () => {
     ).toHaveLength(1);
     expect(details).not.toMatch(/CORRELATED|LEFT-JOIN|SCAN completed/u);
 
+    db.$client.close();
+  });
+
+  it("recovers background tasks with bounded indexed scans instead of per-event subqueries", () => {
+    const { db, host, thread } = setup();
+    const captured = captureStatements(db, () => {
+      expect(listOpenBackgroundTaskItemRowsForHost(db, { hostId: host.id })).toEqual([]);
+      expect(listOpenBackgroundTaskItemRowsForThread(db, { threadId: thread.id })).toEqual([]);
+    });
+    const queries = captured.filter((entry) => entry.sql.includes("latest_host_background_task"));
+    expect(queries).toHaveLength(2);
+    for (const query of queries) {
+      const details = queryPlanDetails({ db, params: query.params, sql: query.sql });
+      expect(details).toMatch(/events_background_task_thread_type_item_sequence_idx/u);
+      expect(details).toMatch(/events_thread_type_item_kind_sequence_idx/u);
+      expect(details).not.toMatch(/CORRELATED|SCAN event(?:$|\s)/u);
+    }
     db.$client.close();
   });
 
@@ -1526,6 +1609,51 @@ describe("slow query index plans", () => {
     expect(pruneQuery.fields.sql).not.toContain("json_extract");
 
     db.$client.close();
+  });
+
+  it.each([
+    ["thread/tokenUsage/updated", pruneTokenUsageEventsInTransaction],
+    ["thread/contextWindowUsage/updated", pruneContextWindowUsageEventsInTransaction],
+  ] as const)("prunes %s by candidate ID while preserving all bounds and keepers", (type, prune) => {
+    const { db, thread, project, logger } = setup();
+    try {
+      const other = createThread(db, noopNotifier, { projectId: project.id, providerId: "codex" });
+      insertEvents(db, noopNotifier, [thread, other].flatMap((target) =>
+        Array.from({ length: 8 }, (_, index) => ({
+          data: "{}", itemId: null, itemKind: null, parentToolCallId: null,
+          scope: turnScope("usage-turn"), sequence: index + 1, threadId: target.id, type,
+        })),
+      ));
+      const rows = db.$client.prepare<[string], { id: string; sequence: number }>(
+        "SELECT id, sequence FROM events WHERE thread_id = ? ORDER BY sequence",
+      ).all(thread.id);
+      const otherId = db.$client.prepare<[string], { id: string }>(
+        "SELECT id FROM events WHERE thread_id = ? LIMIT 1",
+      ).get(other.id)?.id;
+      if (!otherId) throw new Error("Missing other-thread fixture");
+      logger.clear();
+      const removed = prune(db, {
+        threadId: thread.id,
+        candidateIds: [...rows.filter((row) => row.sequence !== 4).map((row) => row.id), otherId],
+        afterSequence: 2, throughSequence: 7,
+        usageKeepers: { latestRootSequence: 6, latestContextSequence: 7 },
+      });
+      expect(removed).toBe(2);
+      expect(db.$client.prepare<[string], { sequence: number }>(
+        "SELECT sequence FROM events WHERE thread_id = ? ORDER BY sequence",
+      ).all(thread.id).map((row) => row.sequence)).toEqual([1, 2, 4, 6, 7, 8]);
+      expect(db.$client.prepare<[string], { n: number }>(
+        "SELECT count(*) n FROM events WHERE thread_id = ?",
+      ).get(other.id)?.n).toBe(8);
+      const deletion = findOnlyDebugLog({ logger, predicate: (fields) =>
+        fields.operation === "run" && fields.sql.startsWith("DELETE FROM events"),
+      });
+      const plan = queryPlanDetails({ db, sql: deletion.fields.sql,
+        params: Array(deletion.fields.bindingArgumentCount).fill(null),
+      });
+      expect(plan).toContain("USING INDEX sqlite_autoindex_events_1 (id=?)");
+      expect(plan).not.toContain("SEARCH events USING INDEX events_thread_type_sequence_idx");
+    } finally { db.$client.close(); }
   });
 
   it("discovers token usage keepers without reading payloads or computing unused byte totals", () => {

@@ -4,8 +4,9 @@ import { ShareHostResolver } from "./hosts.js";
 import { ShareRegistry } from "./shares.js";
 import { TEST_ACCOUNT } from "./testing/fake-account.js";
 
-interface FakeWebSocketOptions {
-  handshakeTimeout?: number;
+interface FakeTunnelOptions {
+  url: string;
+  handshakeTimeoutMs?: number;
   headers?: Record<string, string>;
 }
 
@@ -19,23 +20,30 @@ interface FakeTunnelSocket {
 const fakeWebSockets = vi.hoisted(() => ({
   instances: [] as FakeTunnelSocket[],
   urls: [] as string[],
-  options: [] as FakeWebSocketOptions[],
+  options: [] as FakeTunnelOptions[],
 }));
 
-vi.mock("ws", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("ws")>();
+vi.mock("@bb/tunnel-client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@bb/tunnel-client")>();
   const { EventEmitter } = await import("node:events");
 
-  class FakeWebSocket extends EventEmitter {
-    static readonly OPEN = 1;
+  class FakeIsolatedTunnel extends EventEmitter {
     readyState = 0;
 
-    constructor(url: string, options: FakeWebSocketOptions) {
+    constructor(options: FakeTunnelOptions) {
       super();
       fakeWebSockets.instances.push(this);
-      fakeWebSockets.urls.push(url);
+      fakeWebSockets.urls.push(options.url);
       fakeWebSockets.options.push(options);
     }
+
+    get isOpen(): boolean {
+      return this.readyState === 1;
+    }
+
+    setOrigins(): void {}
+
+    disposeSession(): void {}
 
     close(): void {
       this.readyState = 2;
@@ -46,7 +54,7 @@ vi.mock("ws", async (importOriginal) => {
     }
   }
 
-  return { ...actual, WebSocket: FakeWebSocket };
+  return { ...actual, IsolatedTunnel: FakeIsolatedTunnel };
 });
 
 import { ConnectTunnel } from "./tunnel.js";
@@ -147,9 +155,9 @@ describe("ConnectTunnel socket lifecycle", () => {
       onStatusChange.mockClear();
       const socket = fakeWebSockets.instances[0]!;
       socket.emit("open");
-      socket.emit("unexpected-response", {}, { statusCode: 401, resume() {} });
+      socket.emit("unexpected-response", 401);
       socket.emit("error", new Error("late socket error"));
-      socket.emit("close", 1006, Buffer.from("late close"));
+      socket.emit("close", 1006, "late close");
 
       expect(onStatusChange).not.toHaveBeenCalled();
       expect(tunnel.getIdentity()?.handle).toBe("sawyer");
@@ -175,7 +183,7 @@ describe("ConnectTunnel socket lifecycle", () => {
       currentSocket.emit("open");
       expect(tunnel.status().state).toBe("connected");
 
-      replacedSocket.emit("close", 1006, Buffer.from("late close"));
+      replacedSocket.emit("close", 1006, "late close");
 
       expect(tunnel.status().state).toBe("connected");
     } finally {
@@ -191,10 +199,10 @@ describe("ConnectTunnel socket lifecycle", () => {
       await tunnel.start();
       await socketCount(1);
 
-      expect(fakeWebSockets.options[0]?.handshakeTimeout).toEqual(
+      expect(fakeWebSockets.options[0]?.handshakeTimeoutMs).toEqual(
         expect.any(Number),
       );
-      expect(fakeWebSockets.options[0]!.handshakeTimeout).toBeGreaterThan(0);
+      expect(fakeWebSockets.options[0]!.handshakeTimeoutMs).toBeGreaterThan(0);
     } finally {
       tunnel.stop();
       await fakeHost.harness.dispose();
@@ -273,7 +281,7 @@ describe("ConnectTunnel socket lifecycle", () => {
       socket.emit(
         "close",
         1000,
-        Buffer.from("replaced by a new tunnel connection"),
+        "replaced by a new tunnel connection",
       );
 
       expect(tunnel.status().lastError).toContain("another bb connected");
@@ -308,7 +316,7 @@ describe("ConnectTunnel socket lifecycle", () => {
       replaced.emit(
         "close",
         1000,
-        Buffer.from("replaced by a new tunnel connection"),
+        "replaced by a new tunnel connection",
       );
 
       expect(tunnel.status().lastError).toBeNull();
@@ -331,7 +339,7 @@ describe("ConnectTunnel socket lifecycle", () => {
       socket.readyState = 1;
       socket.emit("open");
 
-      socket.emit("close", 1006, Buffer.from(""));
+      socket.emit("close", 1006, "");
 
       await vi.advanceTimersByTimeAsync(2_000);
       expect(fakeWebSockets.instances).toHaveLength(2);
@@ -350,11 +358,8 @@ describe("ConnectTunnel socket lifecycle", () => {
       await tunnel.start();
       await vi.advanceTimersByTimeAsync(0);
       const socket = fakeWebSockets.instances[0]!;
-      const response = { statusCode: 500, resume: vi.fn() };
+      socket.emit("unexpected-response", 500);
 
-      socket.emit("unexpected-response", {}, response);
-
-      expect(response.resume).toHaveBeenCalledOnce();
       expect(tunnel.status().lastError).toBe("tunnel rejected: HTTP 500");
       expect(confirmRefused).not.toHaveBeenCalled();
       const nextRetryAt = tunnel.status().nextRetryAt;
@@ -378,11 +383,7 @@ describe("ConnectTunnel socket lifecycle", () => {
     try {
       await tunnel.start();
       await vi.advanceTimersByTimeAsync(0);
-      fakeWebSockets.instances[0]!.emit(
-        "unexpected-response",
-        {},
-        { statusCode: 401, resume: vi.fn() },
-      );
+      fakeWebSockets.instances[0]!.emit("unexpected-response", 401);
       expect(tunnel.status()).toMatchObject({
         state: "reconnecting",
         lastError: "the gate refused this bb's server credential (HTTP 401)",
@@ -390,11 +391,7 @@ describe("ConnectTunnel socket lifecycle", () => {
       expect(confirmRefused).toHaveBeenCalledExactlyOnceWith("bbcred_server");
       const firstDelay = tunnel.status().nextRetryAt! - Date.now();
       await vi.advanceTimersByTimeAsync(firstDelay);
-      fakeWebSockets.instances[1]!.emit(
-        "unexpected-response",
-        {},
-        { statusCode: 401, resume: vi.fn() },
-      );
+      fakeWebSockets.instances[1]!.emit("unexpected-response", 401);
       expect(tunnel.status().nextRetryAt! - Date.now()).toBeGreaterThan(
         firstDelay,
       );
@@ -414,18 +411,11 @@ describe("ConnectTunnel socket lifecycle", () => {
       await tunnel.start();
       await vi.advanceTimersByTimeAsync(0);
       const socket = fakeWebSockets.instances[0]!;
-      socket.emit(
-        "unexpected-response",
-        {},
-        {
-          statusCode: 500,
-          resume: vi.fn(),
-        },
-      );
+      socket.emit("unexpected-response", 500);
       const nextRetryAt = tunnel.status().nextRetryAt;
       expect(nextRetryAt).not.toBeNull();
 
-      socket.emit("close", 1006, Buffer.from("late close"));
+      socket.emit("close", 1006, "late close");
 
       expect(tunnel.status().nextRetryAt).toBe(nextRetryAt);
       await vi.advanceTimersByTimeAsync(nextRetryAt! - Date.now());

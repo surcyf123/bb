@@ -88,6 +88,7 @@ type SendThreadMessagePayload = SendMessageRequest & {
 };
 
 interface SendThreadMessageArgs {
+  queuedMessageSenderThreadIds?: readonly (string | null)[];
   beforeAppendInTransaction?: SendThreadMessageTransactionPreflight;
   /**
    * Present only when this send re-submits a failed turn. Marks the turn event
@@ -490,19 +491,27 @@ async function sendThreadMessageWithoutContextClear(
   if (mode === "start") {
     ensureThreadCanStartRequest(thread);
   }
-  const senderThreadId = resolveMessageSenderThreadId(deps, {
+  const resolvedSenderThreadId = resolveMessageSenderThreadId(deps, {
     senderThreadId: payload.senderThreadId,
     targetThread: thread,
   });
+  const senders = args.queuedMessageSenderThreadIds;
+  if (senders && senders.length !== (payload.inputGroups?.length ?? 1))
+    throw new Error("Queue sender attribution does not match input groups");
+  const senderThreadId =
+    senders && !senders.every((sender) => sender === senders[0])
+      ? null
+      : resolvedSenderThreadId;
   let inputGroups = payload.inputGroups
-    ? payload.inputGroups.map((inputGroup) =>
-        senderThreadId
+    ? payload.inputGroups.map((inputGroup, index) => {
+        const sender = senders ? senders[index]! : senderThreadId;
+        return sender
           ? formatAgentThreadInput({
               input: inputGroup,
-              senderThreadId,
+              senderThreadId: sender,
             })
-          : inputGroup,
-      )
+          : inputGroup;
+      })
     : undefined;
   let input =
     inputGroups !== undefined
@@ -549,7 +558,7 @@ async function sendThreadMessageWithoutContextClear(
   // however many times the provider happened to be rate limited.
   const { initiator } = resolveDispatchAuthor({
     retrying: args.retryOf !== undefined,
-    senderThreadId,
+    senderThreadId: senders?.[0] ?? senderThreadId,
     startedOnBehalfOf: null,
   });
   const shouldCaptureUserMessageSent =
@@ -561,7 +570,7 @@ async function sendThreadMessageWithoutContextClear(
   // A retry's model is provenance — the failed attempt's tuple, replayed —
   // not a fresh model choice, so it must not rewrite the thread's sticky
   // override the way an explicit user send's model does.
-  if (senderThreadId === null && args.retryOf === undefined) {
+  if (initiator === "user" && args.retryOf === undefined) {
     await recoverThreadModelOverride(deps, {
       model: payload.model,
       modelSource:

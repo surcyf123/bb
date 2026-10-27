@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getAppSettings } from "@bb/db";
+import { getAppSettings, setAppSettings } from "@bb/db";
 import { appSettingsSchema, defaultAppSettings } from "@bb/domain";
 import { systemConfigResponseSchema } from "@bb/server-contract";
 import { readJson } from "../helpers/json.js";
@@ -7,6 +7,17 @@ import { withTestHarness } from "../helpers/test-app.js";
 import { seedHostSession, seedPrimaryHost } from "../helpers/seed.js";
 
 describe("general settings", () => {
+  it("preserves queue delivery settings when an older client updates another setting", async () => {
+    await withTestHarness(async (harness) => {
+      setAppSettings(harness.db, { ...defaultAppSettings, batchReadyQueuedMessages: true, readyQueueSenderCap: 3, childOutcomeBatchWindowMs: 300000 });
+      const legacy: Record<string, unknown> = { ...defaultAppSettings, showKeyboardHints: false };
+      delete legacy.batchReadyQueuedMessages; delete legacy.readyQueueSenderCap; delete legacy.childOutcomeBatchWindowMs;
+      const response = await harness.app.request("/api/v1/settings/general", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(legacy) });
+      expect(response.status).toBe(200);
+      expect(getAppSettings(harness.db)).toMatchObject({ batchReadyQueuedMessages: true, readyQueueSenderCap: 3, childOutcomeBatchWindowMs: 300000, showKeyboardHints: false });
+    });
+  });
+
   it("reports only the server's local host in /system/config", async () => {
     await withTestHarness(async (harness) => {
       seedHostSession(harness.deps, { name: "remote" });

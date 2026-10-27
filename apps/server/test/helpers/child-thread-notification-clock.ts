@@ -6,7 +6,7 @@ export function withChildThreadNotificationClock(
   run: (harness: TestAppHarness) => Promise<void>,
 ): Promise<void> {
   return withTestHarness(async (harness) => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     try {
       await run(harness);
     } finally {

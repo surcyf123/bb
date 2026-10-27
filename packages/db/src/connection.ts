@@ -12,6 +12,13 @@ export interface SlowDbQueryLogFields {
   operation: SlowDbQueryOperation;
   sql: string;
   thresholdMs: number;
+  transaction?: SlowDbTransactionTiming;
+}
+
+export interface SlowDbTransactionTiming {
+  lockWaitMs: number;
+  bodyMs: number;
+  callers?: string[];
 }
 
 export interface SlowDbQueryLogger {
@@ -46,9 +53,12 @@ interface TimedStatementOperationArgs<TValue> {
   operation: SlowDbQueryOperation;
   source: string;
   work: () => TValue;
+  transactionTiming?: (durationMs: number) => SlowDbTransactionTiming;
 }
 
 const DEFAULT_SLOW_DB_QUERY_LOG_THRESHOLD_MS = 100;
+const SLOW_IMMEDIATE_TRANSACTION_CALLERS_MS = 1_000;
+const MAX_LOGGED_TRANSACTION_CALLERS = 8;
 export const SQLITE_CACHE_SIZE_KIB = 262_144;
 export const SQLITE_MMAP_SIZE_BYTES = 1_073_741_824;
 export const SQLITE_BUSY_TIMEOUT_MS = 5_000;
@@ -92,6 +102,9 @@ function runTimedStatementOperation<TValue>(
           operation: args.operation,
           sql: formatSqlForLog(args.source),
           thresholdMs: args.config.thresholdMs,
+          ...(args.transactionTiming === undefined
+            ? {}
+            : { transaction: args.transactionTiming(durationMs) }),
         },
         "Slow DB query",
       );
@@ -136,6 +149,32 @@ function instrumentStatement(
   return statement;
 }
 
+function transactionTiming(args: {
+  bodyStartedAt: number;
+  callers: string | undefined;
+  durationMs: number;
+  startedAt: number;
+}): SlowDbTransactionTiming {
+  const lockWaitMs = roundDurationMs(args.bodyStartedAt - args.startedAt);
+  const timing = {
+    lockWaitMs,
+    bodyMs: roundDurationMs(args.durationMs - lockWaitMs),
+  };
+  if (
+    args.callers === undefined ||
+    args.durationMs < SLOW_IMMEDIATE_TRANSACTION_CALLERS_MS
+  ) {
+    return timing;
+  }
+  return {
+    ...timing,
+    callers: args.callers
+      .split("\n")
+      .slice(2, 2 + MAX_LOGGED_TRANSACTION_CALLERS)
+      .map((line) => line.trim()),
+  };
+}
+
 function instrumentSqliteClient(
   sqlite: Database.Database,
   options: CreateConnectionOptions,
@@ -159,17 +198,48 @@ function instrumentSqliteClient(
       work: () => originalExec(source),
     });
   const originalTransaction = sqlite.transaction.bind(sqlite);
+  let transactionDepth = 0;
+  let outerBodyStartedAt: number | null = null;
   sqlite.transaction = (fn) => {
-    const original = originalTransaction(fn);
+    const timedBody = function (
+      this: unknown,
+      ...args: Parameters<typeof fn>
+    ) {
+      if (transactionDepth === 1) outerBodyStartedAt ??= performance.now();
+      return fn.apply(this, args);
+    } as typeof fn;
+    const original = originalTransaction(timedBody);
     function wrap(mode: "default" | "deferred" | "immediate" | "exclusive") {
       return function (this: unknown, ...params: Parameters<typeof original>) {
-        return runTimedStatementOperation({
-          bindingArgumentCount: params.length,
-          config,
-          operation: "transaction",
-          source: `TRANSACTION ${mode.toUpperCase()}`,
-          work: () => original[mode].apply(this, params),
-        });
+        const outer = transactionDepth === 0;
+        const startedAt = performance.now();
+        const callers =
+          outer && mode === "immediate" ? new Error().stack : undefined;
+        transactionDepth += 1;
+        try {
+          return runTimedStatementOperation({
+            bindingArgumentCount: params.length,
+            config,
+            operation: "transaction",
+            source: `TRANSACTION ${mode.toUpperCase()}`,
+            work: () => original[mode].apply(this, params),
+            ...(outer
+              ? {
+                  transactionTiming: (durationMs: number) =>
+                    transactionTiming({
+                      bodyStartedAt:
+                        outerBodyStartedAt ?? startedAt + durationMs,
+                      callers,
+                      durationMs,
+                      startedAt,
+                    }),
+                }
+              : {}),
+          });
+        } finally {
+          transactionDepth -= 1;
+          if (outer) outerBodyStartedAt = null;
+        }
       };
     }
     const modes = {

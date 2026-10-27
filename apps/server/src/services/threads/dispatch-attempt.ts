@@ -534,7 +534,11 @@ async function runDispatchAttempt(
       ),
       attempt,
       initiator: author.initiator,
-      senderThreadId: author.senderThreadId,
+      senderThreadId:
+        claimed &&
+        !claimed.every((row) => row.senderThreadId === author.senderThreadId)
+          ? null
+          : author.senderThreadId,
       origin: args.origin,
       originPluginId: args.originPluginId,
       startedOnBehalfOf: args.startedOnBehalfOf,
@@ -593,6 +597,13 @@ async function runDispatchAttempt(
   const environment = await requireThreadCommandEnvironment(deps, { thread });
   try {
     await sendThreadMessage(deps, {
+      ...(claimed
+        ? {
+            queuedMessageSenderThreadIds: claimed.map(
+              (row) => row.senderThreadId,
+            ),
+          }
+        : {}),
       environment,
       payload: resolvedPayload,
       thread,
@@ -623,7 +634,7 @@ async function runDispatchAttempt(
     );
   }
   if (claimed !== null) {
-    settleQueueRowDispatched({ row: claimed[0]! });
+    for (const row of claimed) settleQueueRowDispatched({ row });
   }
   return { kind: "dispatched" };
 }

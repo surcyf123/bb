@@ -1931,3 +1931,34 @@ Publish updates with **Mobile Android (EAS)**, profile `preview`, **publish** on
 
 The publishing workflow verifies the signed APK and publishes both the checksum-named
 asset and the stable `bb-android.apk` alias, then `latest.json`.
+
+## Queue delivery settings
+
+Use `bb settings general batchReadyQueuedMessages true` to deliver compatible ready
+queued messages in one turn, retaining each sender's attribution. Different execution
+settings, human/agent boundaries, first dispatch, scheduled messages, retries, and edit holds stay
+separate. A manual stop continues to pause ordinary queued work.
+
+Use `bb settings general readyQueueSenderCap 3` to append an agent sender's fourth
+compatible ready message to its newest ready row. Zero disables coalescing. Original
+text, attachments and a distinct enqueue receipt are retained; scheduled and claimed
+rows are never merged. Automatic batches stop at 32 rows or 64,000 serialized
+characters; coalescing also stops at 64,000 characters. Overflow remains in separate
+queued rows, even when this exceeds the per-sender row target.
+
+Use `bb settings general childOutcomeBatchWindowMs 300000` for a fixed five-minute
+window of successful child outcomes (default 2000; maximum 300000). Each result is
+persisted immediately in the native queue. Further results keep the first deadline.
+Failures and interruptions bypass the window. Pending interaction notices remain
+immediate. Source receipts deduplicate terminal-event replay after a restart, and
+queue consumption commits with the parent turn request. Queued records and their
+receipts survive reloads; do not remove them during rollback.
+
+The server's thread event log records `queue/enqueued` and `queue/dispatched` in
+the existing `provider/unhandled` diagnostic envelope (`providerId: bb-queue`,
+`rawType`, and `rawEvent.params`) with
+queuedMessageId, original createdAt, sender identity, and a dispatch timestamp. A
+coalesced enqueue has a distinct enqueueId and `merged: true`, so row count and
+message count can be measured separately. These events are server-generated and
+do not change the host-daemon command protocol.
+

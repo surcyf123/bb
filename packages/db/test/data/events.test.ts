@@ -54,6 +54,7 @@ import {
   listActiveBackgroundTaskCountsByThreadIds,
   listLatestBackgroundTaskStateRowsByItemIds,
   listOpenBackgroundTaskItemRowsForHost,
+  listOpenBackgroundTaskItemRowsForThread,
   listThreadTurnInterruptionEventStates,
   listLatestOpenBackgroundTaskStateRowsForThread,
 } from "../../src/data/events.js";
@@ -4401,6 +4402,33 @@ describe("events", () => {
     expect(
       listOpenBackgroundTaskItemRowsForHost(db, { hostId: otherHost.id }),
     ).toEqual([]);
+  });
+
+  it("keeps recovery scoped by thread and excludes completed tasks with legacy item kinds", () => {
+    const { db, project, thread } = setup();
+    const sibling = createThread(db, noopNotifier, { projectId: project.id, providerId: "codex" });
+    const start = (threadId: string, itemId: string, sequence: number): InsertEventInput => ({
+      threadId, itemId, sequence, itemKind: "backgroundTask",
+      parentToolCallId: null, scope: threadScope(), type: "item/started",
+      data: JSON.stringify({ item: { id: itemId, status: "pending" } }),
+    });
+    insertEvents(db, noopNotifier, [
+      start(thread.id, "shared", 1),
+      { ...start(thread.id, "shared", 2), type: "item/backgroundTask/completed", itemKind: null },
+      start(thread.id, "shared", 3),
+      start(thread.id, "open", 4),
+      { ...start(thread.id, "open", 5), type: "item/backgroundTask/progress", data: "latest-progress" },
+      start(sibling.id, "shared", 1),
+      { ...start(thread.id, "null-item", 6), itemId: null },
+      { ...start(thread.id, "tool", 7), itemKind: "toolCall" },
+    ]);
+    expect(listOpenBackgroundTaskItemRowsForThread(db, { threadId: thread.id })).toEqual([
+      { threadId: thread.id, environmentId: null, itemId: "open", providerThreadId: null, data: "latest-progress" },
+    ]);
+    expect(listOpenBackgroundTaskItemRowsForThread(db, { threadId: sibling.id })).toMatchObject([
+      { threadId: sibling.id, itemId: "shared" },
+    ]);
+    db.$client.close();
   });
 
   it("notifies on events-appended per thread", () => {

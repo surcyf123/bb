@@ -254,4 +254,73 @@ describe("createConnection", () => {
       rmSync(directory, { force: true, recursive: true });
     }
   });
+
+  it("reports a held write lock as lock wait rather than transaction work", () => {
+    const directory = mkdtempSync(join(tmpdir(), "bb-lock-wait-"));
+    const path = join(directory, "bb.db");
+    const holder = createConnection(path);
+    const logger = new CapturingSlowQueryLogger();
+    const waiter = createConnection(path, {
+      slowQueryLogger: logger,
+      slowQueryThresholdMs: 0,
+    });
+    try {
+      waiter.$client.pragma("busy_timeout = 200");
+      holder.$client.exec("BEGIN IMMEDIATE");
+      expect(() =>
+        waiter.$client.transaction(() => undefined).immediate(),
+      ).toThrow(/locked|busy/iu);
+      const timing = getOnlyInfoLog(logger).fields.transaction;
+      expect(timing?.lockWaitMs).toBeGreaterThanOrEqual(150);
+      expect(timing?.bodyMs).toBeLessThan(50);
+    } finally {
+      holder.$client.exec("ROLLBACK");
+      holder.$client.close();
+      waiter.$client.close();
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  it("reports slow transaction work with its callers", () => {
+    const logger = new CapturingSlowQueryLogger();
+    const db = createConnection(":memory:", {
+      slowQueryLogger: logger,
+      slowQueryThresholdMs: 0,
+    });
+    try {
+      const signal = new Int32Array(new SharedArrayBuffer(4));
+      db.$client
+        .transaction(() => {
+          Atomics.wait(signal, 0, 0, 1_050);
+        })
+        .immediate();
+      const timing = getOnlyInfoLog(logger).fields.transaction;
+      expect(timing?.bodyMs).toBeGreaterThanOrEqual(1_000);
+      expect(timing?.lockWaitMs).toBeLessThan(50);
+      expect(timing?.callers?.some((line) => line.includes("connection.test"))).toBe(true);
+    } finally {
+      db.$client.close();
+    }
+  });
+
+  it("times only the outer transaction when transactions nest", () => {
+    const logger = new CapturingSlowQueryLogger();
+    const db = createConnection(":memory:", {
+      slowQueryLogger: logger,
+      slowQueryThresholdMs: 0,
+    });
+    try {
+      const inner = db.$client.transaction(() => undefined);
+      db.$client.transaction(() => inner.immediate()).immediate();
+      const transactions = logger.infoLogs.filter(
+        (log) => log.fields.operation === "transaction",
+      );
+      expect(transactions).toHaveLength(2);
+      expect(
+        transactions.filter((log) => log.fields.transaction !== undefined),
+      ).toHaveLength(1);
+    } finally {
+      db.$client.close();
+    }
+  });
 });

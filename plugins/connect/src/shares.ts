@@ -211,6 +211,16 @@ export class ShareRegistry {
     };
   }
 
+  serverPorts(): number[] {
+    const ports = new Set<number>();
+    for (const share of this.shares.values()) {
+      if (share.hostId === null || share.hostId === this.serverHostId) {
+        ports.add(share.port);
+      }
+    }
+    return [...ports];
+  }
+
   hasServerPort(port: number): boolean {
     for (const share of this.shares.values()) {
       if (share.port !== port) continue;

@@ -117,7 +117,6 @@ function nextCheckpoint(
   previous: Checkpoint,
   orderingBoundarySequence: number | null,
 ): Checkpoint {
-  if (hasCrossTurnState(projection.events)) return previous;
   const activeTurns = new Set<string>();
   const pendingRequests = new Set<string>();
   let completedBoundary = previous.sequenceStart;

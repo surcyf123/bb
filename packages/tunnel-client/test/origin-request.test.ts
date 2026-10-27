@@ -4,6 +4,7 @@ import { requestOriginHttp } from "../src/session.js";
 
 interface SeenRequest {
   body: string;
+  connection: string | undefined;
   contentLength: string | undefined;
   method: string;
 }
@@ -27,6 +28,7 @@ beforeAll(async () => {
     request.on("end", () => {
       seen.push({
         body: Buffer.concat(chunks).toString(),
+        connection: request.headers.connection,
         contentLength: request.headers["content-length"],
         method: request.method ?? "",
       });
@@ -83,5 +85,17 @@ describe("requestOriginHttp", () => {
     expect(response.statusCode).toBe(200);
     await readBody(response);
     expect(seen.at(-1)?.contentLength).toBeUndefined();
+  });
+
+  it("does not reuse loopback connections the origin may close while busy", async () => {
+    const response = await requestOriginHttp({
+      body: undefined,
+      headers: {},
+      method: "GET",
+      signal: new AbortController().signal,
+      url: new URL(`${origin}/api/v1/threads/t1`),
+    });
+    await readBody(response);
+    expect(seen.at(-1)?.connection).toBe("close");
   });
 });

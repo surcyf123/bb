@@ -163,6 +163,79 @@ function countSelectedEventRows(
 }
 
 describe("incremental conversation outlines", () => {
+  it.each([true, false])(
+    "checkpoints historical background work and rebuilds for late updates (settled=%s)",
+    (settled) => {
+      withTestThread((testThread) => {
+        const work = (index: number, complete: boolean): RowSpec => {
+          const id = `historical-work-${index}`;
+          return {
+            type: complete ? "item/completed" : "item/started",
+            turnId: `historical-turn-${index}`,
+            itemId: id,
+            itemKind: "backgroundTask",
+            data: {
+              item: {
+                id,
+                type: "backgroundTask",
+                taskType: "local_bash",
+                description: "Fixture work",
+                status: complete ? "completed" : "pending",
+                taskStatus: complete ? "completed" : "running",
+                skipTranscript: false,
+              },
+            },
+          };
+        };
+        appendRows(testThread, [
+          ...Array.from({ length: 100 }, (_, index) => [
+            started(`historical-turn-${index}`),
+            work(index, false),
+            ...(index === 0 && !settled ? [] : [work(index, true)]),
+            message(`historical-turn-${index}`, `Historical answer ${index}`),
+            completed(`historical-turn-${index}`),
+          ]).flat(),
+          started("live"),
+          delta("live", "Live"),
+        ]);
+        expectMatchesFull(testThread);
+        appendRows(testThread, [delta("live", " continued")]);
+        const ordinary = countSelectedEventRows(testThread, () =>
+          expectMatchesFull(testThread),
+        );
+        expect(ordinary).toBeLessThan(20);
+        appendRows(testThread, [
+          {
+            type: "turn/started",
+            turnId: "late-child",
+            parentToolCallId: "historical-work-0",
+            data: { parentToolCallId: "historical-work-0" },
+          },
+          {
+            ...message("late-child", "Late answer"),
+            parentToolCallId: "historical-work-0",
+            data: {
+              item: {
+                id: "late-message",
+                type: "agentMessage",
+                text: "Late answer",
+                parentToolCallId: "historical-work-0",
+              },
+            },
+          },
+        ]);
+        const late = countSelectedEventRows(testThread, () =>
+          expectMatchesFull(testThread),
+        );
+        expect(late).toBeGreaterThan(100);
+        appendRows(testThread, [work(0, false)]);
+        expectMatchesFull(testThread);
+        appendRows(testThread, [work(0, true)]);
+        expectMatchesFull(testThread);
+      });
+    },
+  );
+
   it.each([950, 1050])(
     "preserves previews across delta compaction with %i historical deltas",
     (deltaCount) => {

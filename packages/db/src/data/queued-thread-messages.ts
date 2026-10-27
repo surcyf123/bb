@@ -1,3 +1,5 @@
+import { appendStoredThreadEventInTransaction } from "./events.js";
+import { getQueueDeliverySettings } from "./queue-delivery-policy.js";
 import { acquireProjectAttachmentOwnership } from "./project-attachments.js";
 import {
   and,
@@ -20,6 +22,10 @@ import {
 } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import {
+  threadScope,
+  promptInputSchema,
+  flattenPromptInputGroups,
+
   QUEUED_MESSAGE_PLUGIN_WAIT_HOLDER_PREFIX,
   projectAttachmentPaths,
 } from "@bb/domain";
@@ -609,11 +615,17 @@ export function createQueuedThreadMessageInTransaction(
     projectAttachmentPaths(input.content),
   );
   const id = createQueuedThreadMessageId();
+  const merged = coalesceReadySenderMessage(tx, input, now);
+  if (merged) {
+    recordQueueEnqueued(tx, merged, id, now, true);
+    return merged;
+  }
   const lastQueuedMessage = getLastQueuedThreadMessage(tx, input.threadId);
   const sortKey = lastQueuedMessage
     ? createOrderKeyAfter({ previousKey: lastQueuedMessage.sortKey })
     : createOrderKeyBetween({ previousKey: null, nextKey: null });
-  return tx
+  const row = tx
+
     .insert(queuedThreadMessages)
     .values({
       id,
@@ -633,6 +645,7 @@ export function createQueuedThreadMessageInTransaction(
       waitHolder:
         input.waitingOn === null ? null : waitHolderFor(input.waitingOn),
       sendAt: input.sendAt,
+      originallyScheduledAt: input.sendAt,
       systemNotice:
         input.systemNotice === null ? null : JSON.stringify(input.systemNotice),
       payloadKind: input.payload.kind,
@@ -652,6 +665,52 @@ export function createQueuedThreadMessageInTransaction(
     })
     .returning()
     .get();
+  recordQueueEnqueued(tx, row, id, now, false);
+  return row;
+}
+
+export function recordQueueEnqueued(tx: DbTransaction, row: QueuedThreadMessageRow, enqueueId: string, createdAt: number, merged: boolean): void {
+  appendStoredThreadEventInTransaction(tx, {
+    threadId: row.threadId,
+    scope: threadScope(),
+    type: "provider/unhandled",
+    data: { providerId: "bb-queue", providerThreadId: "", rawType: "queue/enqueued", rawEvent: { jsonrpc: "2.0", method: "queue/enqueued", params: { queuedMessageId: row.id, enqueueId, createdAt, senderThreadId: row.senderThreadId, sendAt: row.sendAt, merged } } },
+  });
+}
+
+function isAutomaticReadyBatchMember(row: QueuedThreadMessageRow): boolean {
+  return row.systemNotice === null && row.payloadKind === "inline" &&
+    row.origin === null && row.requestedByInitiator === null && row.originallyScheduledAt === null &&
+    row.sendAt === null && row.failureReason === null && row.claimedAt === null &&
+    hasOrdinaryTurnEndWait(row);
+}
+
+function coalesceReadySenderMessage(tx: DbTransaction, input: CreateQueuedThreadMessageInput, now: number): QueuedThreadMessageRow | null {
+  if (!input.senderThreadId || input.sendAt !== null || input.systemNotice !== null ||
+    input.payload.kind !== "inline" || input.origin || input.requestedBy ||
+    (input.waitingOn !== null && input.waitingOn.kind !== "thread-busy" && input.waitingOn.kind !== "turn-starting")) return null;
+  const cap = getQueueDeliverySettings(tx).readyQueueSenderCap;
+  if (cap === 0) return null;
+  const rows = tx.select().from(queuedThreadMessages).where(and(
+    eq(queuedThreadMessages.threadId, input.threadId),
+    eq(queuedThreadMessages.senderThreadId, input.senderThreadId),
+    eq(queuedThreadMessages.model, input.model),
+    eq(queuedThreadMessages.reasoningLevel, input.reasoningLevel),
+    eq(queuedThreadMessages.permissionMode, input.permissionMode),
+    eq(queuedThreadMessages.serviceTier, input.serviceTier),
+    isNull(queuedThreadMessages.originallyScheduledAt),
+    isNull(queuedThreadMessages.claimedAt),
+    isNull(queuedThreadMessages.systemNotice),
+    isNull(queuedThreadMessages.failureReason),
+  )).orderBy(desc(queuedThreadMessages.sortKey), desc(queuedThreadMessages.id)).all()
+    .filter(isAutomaticReadyBatchMember);
+  if (rows.length < cap) return null;
+  const newest = rows[0]!;
+  if (newest.content.length + JSON.stringify(input.content).length + 128 > 64000) return null;
+  const content = promptInputSchema.array().parse(JSON.parse(newest.content));
+  const merged = flattenPromptInputGroups([content, [{ type: "text", text: `Additional message from @thread:${input.senderThreadId} at ${new Date(now).toISOString()}:`, mentions: [] }], input.content]);
+  return tx.update(queuedThreadMessages).set({ content: JSON.stringify(merged), updatedAt: Math.max(now, newest.updatedAt + 1) })
+    .where(eq(queuedThreadMessages.id, newest.id)).returning().get() ?? null;
 }
 
 export function createQueuedThreadMessage(
@@ -1047,26 +1106,22 @@ export function claimNextQueuedThreadMessageGroup(
       // behind it: the queue is a queue, not a pipeline.
       const queuedMessages = listQueuedThreadMessages(tx, threadId);
       const pauseOrdinaryMessages = isThreadQueueAutoSendPaused(tx, threadId);
-      const group =
-        partitionQueuedMessageGroups(queuedMessages).find((rows) => {
-          const eligible =
-            rows.some(isIdleDrainableQueuedMessage) && isGroupEligible(rows);
-          return (
-            eligible &&
-            isAutomaticQueuedThreadMessageGroupClaimAllowed(
-              rows,
-              pauseOrdinaryMessages,
-              false,
-            )
-          );
-        }) ?? null;
-      if (group === null) {
-        return null;
+      const eligibleGroups = partitionQueuedMessageGroups(queuedMessages).filter((rows) => rows.some(isIdleDrainableQueuedMessage) && isGroupEligible(rows) && isAutomaticQueuedThreadMessageGroupClaimAllowed(rows, pauseOrdinaryMessages, false));
+      const group = eligibleGroups[0] ?? null;
+      if (group === null) return null;
+      const batch = [...group];
+      if (getQueueDeliverySettings(tx).batchReadyQueuedMessages && tx.select({ status: threads.status }).from(threads).where(eq(threads.id, threadId)).get()?.status !== "pending" && group.every(isAutomaticReadyBatchMember)) {
+        let bytes = group.reduce((total, row) => total + row.content.length + 64, 0);
+        for (const rows of eligibleGroups.slice(1)) {
+          const size = rows.reduce((total, row) => total + row.content.length + 64, 0);
+          if (batch.length + rows.length > 32 || bytes + size > 64000) break;
+          if (rows.every((row) => isAutomaticReadyBatchMember(row) && (row.senderThreadId === null) === (group[0]!.senderThreadId === null) && queuedMessageGroupingEnvelopeMatches({ ...group[0]!, senderThreadId: row.senderThreadId }, row))) {
+            batch.push(...rows); bytes += size;
+          }
+        }
       }
-      return claimQueuedThreadMessageIdsInTransaction(
-        tx,
-        group.map((row) => row.id),
-      );
+      return claimQueuedThreadMessageIdsInTransaction(tx, batch.map((row) => row.id));
+
     },
     { behavior: "immediate" },
   );
@@ -1486,6 +1541,12 @@ export function deleteClaimedQueuedThreadMessageBatchInTransaction(
   const removingIds = new Set(ids);
   const now = Date.now();
   for (const existing of existingRows) {
+    appendStoredThreadEventInTransaction(db, {
+      threadId: existing.threadId,
+      scope: threadScope(),
+      type: "provider/unhandled",
+      data: { providerId: "bb-queue", providerThreadId: "", rawType: "queue/dispatched", rawEvent: { jsonrpc: "2.0", method: "queue/dispatched", params: { queuedMessageId: existing.id, createdAt: existing.createdAt, dispatchedAt: now, senderThreadId: existing.senderThreadId } } },
+    });
     const previousQueuedMessage = getPreviousUnclaimedQueuedThreadMessage(
       db,
       existing,
@@ -1757,7 +1818,7 @@ export function setQueuedThreadMessageFailureReason(
       }
       const failureCount = existing.failureCount + 1;
       const delayMs = args.retryDelaysMs[failureCount - 1];
-      return (
+      const result = (
         tx
           .update(queuedThreadMessages)
           .set({
@@ -1776,6 +1837,15 @@ export function setQueuedThreadMessageFailureReason(
           .returning()
           .get() ?? null
       );
+      if (result !== null && delayMs === undefined) {
+        tx.run(sql`INSERT OR IGNORE INTO bb_local_child_notification_outbox (source_key, parent_thread_id, child_thread_id, turn_id, data, interruption_data, created_at)
+          SELECT child.parent_thread_id || ':' || child.id || ':queue:' || ${result.id} || ':' || ${result.failureCount}, child.parent_thread_id, child.id, NULL,
+            ${JSON.stringify({ status: "failed", failureContext: "could not send a queued message after retrying" })}, NULL, ${args.now}
+          FROM threads child JOIN threads parent ON parent.id = child.parent_thread_id
+          WHERE child.id = ${args.threadId} AND child.origin_kind IS NULL AND child.deleted_at IS NULL AND parent.deleted_at IS NULL AND parent.archived_at IS NULL`);
+      }
+      return result;
+
     },
     { behavior: "immediate" },
   );

@@ -1553,6 +1553,7 @@ interface BuildThreadConversationOutlineOptions {
 
 interface LoadThreadConversationOutlineOptions extends BuildThreadConversationOutlineOptions {
   outlineSequence: number;
+  materialize?: boolean;
 }
 
 const CONVERSATION_OUTLINE_PREVIEW_MAX_LENGTH = 200;
@@ -1608,7 +1609,7 @@ function selectThreadConversationOutline(
     threadId: thread.id,
   });
   const decodedRawEvents = rawEventRows.map((row) =>
-    toThreadEventWithMeta(row),
+    withRowMeta(row, decodeStoredEventRowCached(db, row)),
   );
   const decodedEvents = compactThreadTimelineSummaryEvents(
     decodedRawEvents,
@@ -1620,10 +1621,10 @@ function selectThreadConversationOutline(
   });
   const acceptedClientRequestContext: AcceptedClientRequestContext = {
     acceptedClientRequestEvents: clientRequestContextRows.acceptedRows.map(
-      (row) => toThreadEventWithMeta(row),
+      (row) => withRowMeta(row, decodeStoredEventRowCached(db, row)),
     ),
     rejectedClientRequestEvents: clientRequestContextRows.rejectedRows.map(
-      (row) => toThreadEventWithMeta(row),
+      (row) => withRowMeta(row, decodeStoredEventRowCached(db, row)),
     ),
   };
   return {
@@ -1780,7 +1781,7 @@ export function loadThreadConversationOutline(
       };
     },
   );
-  if (shouldMaterializeThreadConversationOutline(thread)) {
+  if (options.materialize !== false && shouldMaterializeThreadConversationOutline(thread)) {
     upsertThreadConversationOutlineRecord(db, {
       itemsJson: JSON.stringify(response.items),
       projectionKey,

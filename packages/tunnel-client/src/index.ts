@@ -6,3 +6,9 @@ export {
   TunnelSession,
   type StreamOriginResult,
 } from "./session.js";
+export {
+  IsolatedTunnel,
+  type IsolatedTunnelError,
+  type OriginSnapshot,
+  type ResolvedOrigin,
+} from "./isolated.js";

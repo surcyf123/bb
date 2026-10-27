@@ -305,6 +305,9 @@ export function registerSystemRoutes(
         : undefined;
     const updatedSettings = appSettingsSchema.parse({
       ...settings,
+      batchReadyQueuedMessages: settings.batchReadyQueuedMessages ?? current.batchReadyQueuedMessages,
+      readyQueueSenderCap: settings.readyQueueSenderCap ?? current.readyQueueSenderCap,
+      childOutcomeBatchWindowMs: settings.childOutcomeBatchWindowMs ?? current.childOutcomeBatchWindowMs,
       allowFastServiceTier:
         settings.allowFastServiceTier ?? current.allowFastServiceTier,
       telemetryEnabled: settings.telemetryEnabled ?? current.telemetryEnabled,

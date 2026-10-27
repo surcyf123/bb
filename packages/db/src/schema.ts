@@ -857,6 +857,17 @@ export const events = sqliteTable(
   ],
 );
 
+export const clientTurnRequestLookup = sqliteTable(
+  "client_turn_request_lookup",
+  {
+    eventId: text("event_id").primaryKey().references(() => events.id, { onDelete: "cascade" }),
+    threadId: text("thread_id").notNull(),
+    requestId: text("request_id").notNull(),
+    sequence: integer("sequence").notNull(),
+  },
+  (table) => [index("client_turn_request_lookup_key_idx").on(table.threadId, table.requestId, table.sequence)],
+);
+
 export const retainedEventOutputs = sqliteTable(
   "retained_event_outputs",
   {
@@ -1013,6 +1024,7 @@ export const queuedThreadMessages = sqliteTable(
     // Epoch ms this row is scheduled to attempt dispatch. NULL means "as soon
     // as the other waits clear", which is what an ordinary queued row is.
     sendAt: integer("send_at"),
+    originallyScheduledAt: integer("bb_local_originally_scheduled_at"),
     // JSON `QueuedMessageWaitingOn`: the typed reason this row is queued.
     // NULL for a plain queued row that is simply next in line behind the
     // running turn — including every row written before waits were typed, for
@@ -1021,6 +1033,7 @@ export const queuedThreadMessages = sqliteTable(
     // A plugin wait's authored reason lives HERE and nowhere else. There is
     // deliberately no `wait_reason` column: nothing queries on the reason, and
     // every read that renders it already has the whole row in hand.
+
     waitingOn: text("waiting_on"),
     // Denormalized `plugin:<id>` owner of a plugin wait, NULL otherwise.
     // Unlike the reason, this IS queried — the orphan sweep and the
@@ -1333,4 +1346,44 @@ export const projectAttachmentBackfills = sqliteTable(
     attemptedAt: integer("attempted_at").notNull(),
     error: text("error"),
   },
+);
+
+export const childNotificationReceipts = sqliteTable(
+  "bb_local_child_notification_receipts",
+  {
+    sourceKey: text("source_key").primaryKey(),
+    parentThreadId: text("parent_thread_id")
+      .notNull()
+      .references(() => threads.id, { onDelete: "cascade" }),
+    childThreadId: text("child_thread_id").notNull(),
+    queuedMessageId: text("queued_message_id").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (table) => [
+    index("bb_local_child_notification_receipts_parent_created_idx").on(
+      table.parentThreadId,
+      table.createdAt,
+    ),
+    index("bb_local_child_notification_receipts_queue_idx").on(table.queuedMessageId),
+  ],
+);
+
+export const childNotificationOutbox = sqliteTable(
+  "bb_local_child_notification_outbox",
+  {
+    sourceKey: text("source_key").primaryKey(),
+    parentThreadId: text("parent_thread_id")
+      .notNull()
+      .references(() => threads.id, { onDelete: "cascade" }),
+    childThreadId: text("child_thread_id")
+      .notNull()
+      .references(() => threads.id, { onDelete: "cascade" }),
+    turnId: text("turn_id"),
+    data: text("data").notNull(),
+    interruptionData: text("interruption_data"),
+    createdAt: integer("created_at").notNull(),
+  },
+  (table) => [
+    index("bb_local_child_notification_outbox_created_idx").on(table.createdAt),
+  ],
 );

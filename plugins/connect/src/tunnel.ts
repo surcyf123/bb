@@ -1,4 +1,3 @@
-import { WebSocket as NodeWebSocket } from "ws";
 import {
   PROTOCOL_VERSION,
   TUNNEL_PROTOCOL_QUERY_PARAM,
@@ -6,8 +5,9 @@ import {
 } from "@bb/tunnel-contract";
 import {
   humanizeTransportError,
+  IsolatedTunnel,
   ReconnectBackoff,
-  TunnelSession,
+  type OriginSnapshot,
   type StreamOriginResult,
 } from "@bb/tunnel-client";
 import type { PluginLogger } from "@get-bb/plugin-sdk";
@@ -27,6 +27,7 @@ const TUNNEL_HANDSHAKE_TIMEOUT_MS = 10_000;
 const TUNNEL_CLOSE_GRACE_MS = 1_000;
 const TUNNEL_CLEAN_CLOSE_CODE = 1000;
 const TUNNEL_REPLACED_RETRY_MS = 5 * 60_000;
+const ORIGIN_REFRESH_MS = 5_000;
 
 export interface ConnectIdentity {
   serverId: string;
@@ -72,8 +73,8 @@ function sameIdentity(
 export class ConnectTunnel {
   private identity: ConnectIdentity | null = null;
   private enabled: boolean;
-  private tunnel: NodeWebSocket | undefined;
-  private session: TunnelSession | undefined;
+  private tunnel: IsolatedTunnel | undefined;
+  private originRefreshTimer: ReturnType<typeof setInterval> | undefined;
   private connected = false;
   private pairing = false;
   private lastError: string | null = null;
@@ -236,7 +237,27 @@ export class ConnectTunnel {
       this.lastState = state;
       this.stateSince = Date.now();
     }
+    this.pushOrigins();
     this.options.onStatusChange?.(this.status());
+  }
+
+  private originSnapshot(): OriginSnapshot {
+    const fallback = this.resolveStreamOrigin(undefined);
+    const ports: OriginSnapshot["ports"] = [];
+    for (const port of this.options.shares.serverPorts()) {
+      const result = this.resolveStreamOrigin(String(port));
+      if (result.kind === "ok") ports.push([port, result.resolved]);
+    }
+    return {
+      default: fallback.kind === "ok" ? fallback.resolved : null,
+      ports,
+    };
+  }
+
+  private pushOrigins(): void {
+    const tunnel = this.tunnel;
+    if (tunnel === undefined || tunnel.readyState > 1) return;
+    tunnel.setOrigins(this.originSnapshot());
   }
 
   private teardown(): void {
@@ -251,11 +272,11 @@ export class ConnectTunnel {
       clearTimeout(this.shareRetryTimer);
       this.shareRetryTimer = undefined;
     }
-    this.session?.dispose();
-    this.session = undefined;
+    this.stopOriginRefresh();
     this.remoteClients = 0;
     const tunnel = this.tunnel;
-    if (tunnel !== undefined && tunnel.readyState === NodeWebSocket.OPEN) {
+    if (tunnel !== undefined && tunnel.isOpen) {
+      tunnel.disposeSession();
       tunnel.close(TUNNEL_CLEAN_CLOSE_CODE, "tunnel closed by bb");
       setTimeout(() => tunnel.terminate(), TUNNEL_CLOSE_GRACE_MS).unref?.();
     } else {
@@ -350,8 +371,8 @@ export class ConnectTunnel {
   ): void {
     if (!this.isCurrentDial(epoch) || this.reconnectTimer !== undefined) return;
     this.connected = false;
-    this.session?.dispose();
-    this.session = undefined;
+    this.stopOriginRefresh();
+    this.tunnel?.disposeSession();
     this.remoteClients = 0;
     const backoffDelay = this.backoff.nextDelayAfterClose(stableMs);
     const delay = delayOverrideMs ?? backoffDelay;
@@ -365,6 +386,12 @@ export class ConnectTunnel {
       this.openTunnel();
     }, delay);
     this.publish();
+  }
+
+  private stopOriginRefresh(): void {
+    if (this.originRefreshTimer === undefined) return;
+    clearInterval(this.originRefreshTimer);
+    this.originRefreshTimer = undefined;
   }
 
   private openTunnel(): void {
@@ -423,11 +450,22 @@ export class ConnectTunnel {
     this.options.log.info(
       `tunnel connecting to ${tunnelUrl} (origin ${this.options.getLoopbackBaseUrl()})`,
     );
-    let tunnel: NodeWebSocket;
+    let tunnel: IsolatedTunnel;
     try {
-      tunnel = new NodeWebSocket(tunnelUrl, {
+      tunnel = new IsolatedTunnel({
+        url: tunnelUrl,
         headers: { authorization: `Bearer ${credential}` },
-        handshakeTimeout: TUNNEL_HANDSHAKE_TIMEOUT_MS,
+        handshakeTimeoutMs: TUNNEL_HANDSHAKE_TIMEOUT_MS,
+        log: this.options.log,
+        onRemoteClientsChange: (count) => {
+          if (this.tunnel !== tunnel) return;
+          this.remoteClients = count;
+          this.publish();
+        },
+        onActivity: (at) => {
+          if (this.tunnel !== tunnel) return;
+          this.lastRemoteActivityAt = at;
+        },
       });
     } catch (error) {
       this.lastError = `cannot dial ${tunnelUrl}: ${
@@ -437,6 +475,7 @@ export class ConnectTunnel {
       return;
     }
     this.tunnel = tunnel;
+    tunnel.setOrigins(this.originSnapshot());
     let connectedAt = 0;
     let retryScheduled = false;
     let handshakeDeadline: ReturnType<typeof setTimeout> | undefined;
@@ -467,32 +506,26 @@ export class ConnectTunnel {
     handshakeDeadline.unref?.();
 
     tunnel.on("open", () => {
-      if (!isCurrent()) return;
+      if (!isCurrent()) {
+        tunnel.disposeSession();
+        return;
+      }
       clearTimeout(handshakeDeadline);
       connectedAt = Date.now();
       this.connected = true;
       this.lastError = null;
       this.nextRetryAt = null;
       this.options.log.info("tunnel connected");
-      this.session = new TunnelSession({
-        tunnel,
-        log: this.options.log,
-        resolveOrigin: (target) => this.resolveStreamOrigin(target),
-        onRemoteClientsChange: (count) => {
-          this.remoteClients = count;
-          this.publish();
-        },
-        onActivity: (at) => {
-          this.lastRemoteActivityAt = at;
-        },
-      });
-      this.session.start();
+      this.stopOriginRefresh();
+      this.originRefreshTimer = setInterval(
+        () => this.pushOrigins(),
+        ORIGIN_REFRESH_MS,
+      );
+      this.originRefreshTimer.unref?.();
       this.publish();
     });
-    tunnel.on("unexpected-response", (_req, res) => {
+    tunnel.on("unexpected-response", (statusCode) => {
       if (!isCurrent()) return;
-      res.resume();
-      const statusCode = res.statusCode ?? 0;
       const refused = statusCode === 401 || statusCode === 403;
       this.lastError = refused
         ? `the gate refused this bb's server credential (HTTP ${statusCode})`
@@ -501,14 +534,14 @@ export class ConnectTunnel {
       retry(this.lastError);
       tunnel.terminate();
     });
-    tunnel.on("error", (e: Error) => {
+    tunnel.on("error", (e) => {
       if (!isCurrent()) return;
       this.lastError = humanizeTransportError(e, connectApexHost(identity));
     });
-    tunnel.on("close", (code: number, reason: Buffer) => {
+    tunnel.on("close", (code, reason) => {
       if (
         code === TUNNEL_CLEAN_CLOSE_CODE &&
-        reason.toString() === TUNNEL_REPLACED_CLOSE_REASON
+        reason === TUNNEL_REPLACED_CLOSE_REASON
       ) {
         if (!isCurrent()) return;
         this.lastError =
@@ -517,7 +550,7 @@ export class ConnectTunnel {
         return;
       }
       retry(
-        `tunnel closed (code ${code}${reason.length > 0 ? `, ${reason.toString()}` : ""})`,
+        `tunnel closed (code ${code}${reason.length > 0 ? `, ${reason}` : ""})`,
       );
     });
   }
