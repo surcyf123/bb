@@ -23,6 +23,9 @@ import {
 import { previewTimelineResponseOutputs } from "./timeline-output-preview.js";
 
 const OUTLINE_CACHE_MAX_ENTRIES = 32;
+const OUTLINE_PREWARM_INTERVAL_MS = 2_000;
+const OUTLINE_PREWARM_WINDOW_MS = 120_000;
+const OUTLINE_PREWARM_MAX_THREADS = 8;
 const WORKER_DECODE_CACHE_MAX_ENTRIES = 600_000;
 const WORKER_DECODE_CACHE_MAX_DATA_CHARS = 400_000_000;
 
@@ -84,7 +87,7 @@ function syncGeneration(threadId: string, generation: number): void {
   syncThreadEventRewriteGeneration(threadId, generation);
 }
 
-function readOutline(request: Extract<ReadRequest, { kind: "outline" }>): string {
+function readOutline(request: OutlineRequest): string {
   return db.$client.transaction(() => {
     const thread = getThread(db, request.threadId);
     if (thread === null || thread.deletedAt !== null) {
@@ -144,6 +147,38 @@ function buildTimeline(request: Extract<ReadRequest, { kind: "timeline" }>) {
   };
 }
 
+type OutlineRequest = Extract<ReadRequest, { kind: "outline" }>;
+const recentOutlineRequests = new Map<
+  string,
+  { request: OutlineRequest; at: number }
+>();
+
+function rememberOutlineRequest(request: OutlineRequest): void {
+  const key = JSON.stringify([request.threadId, request.outlineOptions]);
+  recentOutlineRequests.delete(key);
+  recentOutlineRequests.set(key, { request, at: Date.now() });
+  while (recentOutlineRequests.size > OUTLINE_PREWARM_MAX_THREADS) {
+    const oldest = recentOutlineRequests.keys().next().value;
+    if (oldest === undefined) break;
+    recentOutlineRequests.delete(oldest);
+  }
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of recentOutlineRequests) {
+    if (now - entry.at > OUTLINE_PREWARM_WINDOW_MS) {
+      recentOutlineRequests.delete(key);
+      continue;
+    }
+    try {
+      readOutline(entry.request);
+    } catch {
+      recentOutlineRequests.delete(key);
+    }
+  }
+}, OUTLINE_PREWARM_INTERVAL_MS);
+
 port.on("message", (message: unknown) => {
   const parsed = requestSchema.safeParse(message);
   if (!parsed.success) {
@@ -160,6 +195,7 @@ port.on("message", (message: unknown) => {
   const request = parsed.data;
   try {
     syncGeneration(request.threadId, request.rewriteGeneration);
+    if (request.kind === "outline") rememberOutlineRequest(request);
     const result =
       request.kind === "timeline" ? buildTimeline(request) : readOutline(request);
     port.postMessage({ id: request.id, result });
