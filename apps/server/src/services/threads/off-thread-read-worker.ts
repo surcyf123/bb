@@ -1,0 +1,172 @@
+import { parentPort, workerData } from "node:worker_threads";
+import { z } from "zod";
+import { completedTurnDisplaySchema } from "@bb/domain";
+import type { Thread } from "@bb/domain";
+import {
+  createConnection,
+  getLatestStoredConversationOutlineSequence,
+  getLatestThreadSequence,
+  getThread,
+  syncThreadEventRewriteGeneration,
+} from "@bb/db";
+import type { OffThreadTimelineOptions } from "./off-thread-reads.js";
+import { setStoredEventDecodeCacheLimits } from "./stored-event-decode-cache.js";
+import {
+  buildThreadTimelineWithProfile,
+  loadThreadConversationOutline,
+} from "./timeline.js";
+import { clearTimelineOrderingContextCache } from "./timeline-context-order.js";
+import {
+  DEFAULT_MAX_INLINE_OUTPUT_CHARS,
+  truncateTimelineResponseOutputs,
+} from "./timeline-output-truncation.js";
+import { previewTimelineResponseOutputs } from "./timeline-output-preview.js";
+
+const OUTLINE_CACHE_MAX_ENTRIES = 32;
+const WORKER_DECODE_CACHE_MAX_ENTRIES = 600_000;
+const WORKER_DECODE_CACHE_MAX_DATA_CHARS = 400_000_000;
+
+const baseRequestSchema = z.object({
+  id: z.number().int(),
+  threadId: z.string(),
+  rewriteGeneration: z.number().int().nonnegative(),
+});
+const requestSchema = z.discriminatedUnion("kind", [
+  baseRequestSchema.extend({
+    kind: z.literal("outline"),
+    outlineOptions: z.object({
+      completedTurnDisplay: completedTurnDisplaySchema,
+      includeClearedContextHistory: z.boolean(),
+      providerDisplayName: z.string().optional(),
+    }),
+  }),
+  baseRequestSchema.extend({
+    kind: z.literal("timeline"),
+    thread: z.custom<Thread>(
+      (value) =>
+        typeof value === "object" &&
+        value !== null &&
+        "id" in value &&
+        typeof value.id === "string",
+    ),
+    options: z.custom<OffThreadTimelineOptions>(
+      (value) =>
+        typeof value === "object" &&
+        value !== null &&
+        "maxSeq" in value &&
+        "page" in value,
+    ),
+  }),
+]);
+type ReadRequest = z.infer<typeof requestSchema>;
+
+const { databasePath } = z
+  .object({ databasePath: z.string() })
+  .parse(workerData);
+const port = parentPort;
+if (port === null) throw new Error("Off-thread read worker requires a parent");
+
+setStoredEventDecodeCacheLimits({
+  maxEntries: WORKER_DECODE_CACHE_MAX_ENTRIES,
+  maxDataChars: WORKER_DECODE_CACHE_MAX_DATA_CHARS,
+});
+const db = createConnection(databasePath);
+db.$client.pragma("query_only = ON");
+const outlineItemsCache = new Map<string, string>();
+const seenGenerations = new Map<string, number>();
+
+function syncGeneration(threadId: string, generation: number): void {
+  const previous = seenGenerations.get(threadId);
+  if (previous !== undefined && previous !== generation) {
+    clearTimelineOrderingContextCache(db);
+  }
+  seenGenerations.set(threadId, generation);
+  syncThreadEventRewriteGeneration(threadId, generation);
+}
+
+function readOutline(request: Extract<ReadRequest, { kind: "outline" }>): string {
+  return db.$client.transaction(() => {
+    const thread = getThread(db, request.threadId);
+    if (thread === null || thread.deletedAt !== null) {
+      throw new Error("Thread unavailable");
+    }
+    const maxSeq = getLatestThreadSequence(db, { threadId: thread.id });
+    const outlineSequence = getLatestStoredConversationOutlineSequence(db, {
+      threadId: thread.id,
+    });
+    const cacheKey = JSON.stringify([
+      thread.id,
+      request.rewriteGeneration,
+      outlineSequence,
+      thread.providerId,
+      thread.status,
+      thread.title,
+      thread.titleFallback,
+      request.outlineOptions,
+    ]);
+    let itemsJson = outlineItemsCache.get(cacheKey);
+    if (itemsJson === undefined) {
+      const response = loadThreadConversationOutline(db, thread, {
+        ...request.outlineOptions,
+        maxSeq,
+        outlineSequence,
+      });
+      itemsJson = JSON.stringify(response.items);
+    } else {
+      outlineItemsCache.delete(cacheKey);
+    }
+    outlineItemsCache.set(cacheKey, itemsJson);
+    while (outlineItemsCache.size > OUTLINE_CACHE_MAX_ENTRIES) {
+      const oldest = outlineItemsCache.keys().next().value;
+      if (oldest === undefined) break;
+      outlineItemsCache.delete(oldest);
+    }
+    return `{"items":${itemsJson},"maxSeq":${JSON.stringify(maxSeq)}}`;
+  })();
+}
+
+function buildTimeline(request: Extract<ReadRequest, { kind: "timeline" }>) {
+  const { options } = request;
+  const { profile, response } = buildThreadTimelineWithProfile(
+    db,
+    request.thread,
+    { ...options, maxInlineOutputChars: DEFAULT_MAX_INLINE_OUTPUT_CHARS },
+  );
+  const truncated = truncateTimelineResponseOutputs(
+    response,
+    DEFAULT_MAX_INLINE_OUTPUT_CHARS,
+  );
+  return {
+    full: options.includeNestedRows
+      ? truncated
+      : previewTimelineResponseOutputs(truncated),
+    profile,
+  };
+}
+
+port.on("message", (message: unknown) => {
+  const parsed = requestSchema.safeParse(message);
+  if (!parsed.success) {
+    if (
+      typeof message === "object" &&
+      message !== null &&
+      "id" in message &&
+      typeof message.id === "number"
+    ) {
+      port.postMessage({ id: message.id, error: "Invalid off-thread read request" });
+    }
+    return;
+  }
+  const request = parsed.data;
+  try {
+    syncGeneration(request.threadId, request.rewriteGeneration);
+    const result =
+      request.kind === "timeline" ? buildTimeline(request) : readOutline(request);
+    port.postMessage({ id: request.id, result });
+  } catch (error) {
+    port.postMessage({
+      id: request.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+});

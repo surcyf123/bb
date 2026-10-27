@@ -64,7 +64,10 @@ import {
 import { createEventId } from "../ids.js";
 import { COMPLETED_EVENT_OUTPUT_TRUNCATION_THRESHOLD_CHARS } from "../retained-event-output.js";
 import { truncatedEventDataColumn } from "./event-output-truncation.js";
-import { bumpThreadEventRewriteGeneration } from "./event-rewrite-generation.js";
+import {
+  bumpThreadEventRewriteGeneration,
+  getThreadEventRewriteGeneration,
+} from "./event-rewrite-generation.js";
 import { deriveStoredEventItemFieldsFromSource } from "../stored-event-item-fields.js";
 import {
   upsertThreadSearchSegments,
@@ -1956,7 +1959,121 @@ export function listStoredClientTurnRequestIdsInRange(
   return rows.map((row) => clientTurnRequestIdSchema.parse(row.requestId));
 }
 
+interface TurnRequestIndex {
+  lastSequence: number;
+  sequenceByRequestId: Map<string, number>;
+}
+
+const turnRequestIndexes = new WeakMap<
+  DbQueryConnection,
+  Map<string, TurnRequestIndex>
+>();
+
+function getTurnRequestIndex(
+  db: DbQueryConnection,
+  threadId: string,
+): TurnRequestIndex {
+  let indexes = turnRequestIndexes.get(db);
+  if (indexes === undefined) {
+    indexes = new Map();
+    turnRequestIndexes.set(db, indexes);
+  }
+  let index = indexes.get(threadId);
+  if (index === undefined) {
+    index = { lastSequence: -1, sequenceByRequestId: new Map() };
+    indexes.set(threadId, index);
+  }
+  const rows = db
+    .select({
+      sequence: events.sequence,
+      requestId: sql<unknown>`json_extract(${events.data}, '$.requestId')`,
+    })
+    .from(events)
+    .where(
+      and(
+        eq(events.threadId, threadId),
+        eq(events.type, "client/turn/requested"),
+        gt(events.sequence, index.lastSequence),
+      ),
+    )
+    .orderBy(events.sequence)
+    .all();
+  for (const row of rows) {
+    if (
+      typeof row.requestId === "string" &&
+      !index.sequenceByRequestId.has(row.requestId)
+    ) {
+      index.sequenceByRequestId.set(row.requestId, row.sequence);
+    }
+    index.lastSequence = row.sequence;
+  }
+  return index;
+}
+
 export function getStoredTurnRequestEventForTurn(
+  db: DbQueryConnection,
+  args: GetStoredTurnRequestEventForTurnArgs,
+): StoredTurnRequestEventRow | null {
+  const requestId = getAcceptedClientRequestId(db, args);
+  if (requestId === null) return null;
+  const index = getTurnRequestIndex(db, args.threadId);
+  const sequence = index.sequenceByRequestId.get(requestId);
+  if (sequence !== undefined) {
+    const verified = db
+      .select({
+        data: events.data,
+        sequence: events.sequence,
+        threadId: events.threadId,
+        type: events.type,
+      })
+      .from(events)
+      .where(
+        and(
+          eq(events.threadId, args.threadId),
+          eq(events.sequence, sequence),
+          eq(events.type, "client/turn/requested"),
+          sql`json_extract(${events.data}, '$.requestId') = ${requestId}`,
+        ),
+      )
+      .limit(1)
+      .get();
+    if (verified !== undefined) return verified;
+    index.sequenceByRequestId.delete(requestId);
+  }
+  const found = getStoredTurnRequestEventForTurnUncached(db, args);
+  if (found !== null) index.sequenceByRequestId.set(requestId, found.sequence);
+  return found;
+}
+
+function getAcceptedClientRequestId(
+  db: DbQueryConnection,
+  args: GetStoredTurnRequestEventForTurnArgs,
+): string | null {
+  const acceptedInput =
+    db
+      .select({
+        clientRequestId: sql<
+          string | null
+        >`json_extract(${events.data}, '$.clientRequestId')`,
+      })
+      .from(events)
+      .where(
+        and(
+          eq(events.threadId, args.threadId),
+          eq(events.turnId, args.turnId),
+          eq(events.type, "turn/input/accepted"),
+        ),
+      )
+      .orderBy(desc(events.sequence))
+      .limit(1)
+      .get() ?? null;
+  const requestIdResult = clientTurnRequestIdSchema.safeParse(
+    acceptedInput?.clientRequestId,
+  );
+  return requestIdResult.success ? requestIdResult.data : null;
+}
+
+export function getStoredTurnRequestEventForTurnUncached(
   db: DbQueryConnection,
   args: GetStoredTurnRequestEventForTurnArgs,
 ): StoredTurnRequestEventRow | null {
@@ -2335,7 +2452,98 @@ export function listLatestOpenBackgroundTaskStateRowsForThread(
   return rows.sort((left, right) => left.sequence - right.sequence);
 }
 
+interface ActiveBackgroundTaskCountCacheEntry {
+  key: string;
+  row: ActiveBackgroundTaskCountRow | null;
+}
+
+const ACTIVE_BACKGROUND_TASK_COUNT_CACHE_MAX_ENTRIES = 4096;
+const activeBackgroundTaskCountCaches = new WeakMap<
+  DbQueryConnection,
+  Map<string, ActiveBackgroundTaskCountCacheEntry>
+>();
+
+function listBackgroundTaskEventWatermarks(
+  db: DbQueryConnection,
+  threadIds: readonly string[],
+): Map<string, string> {
+  const rows = queryInSqliteVariableBatches({
+    dedupeKey: (threadId) => threadId,
+    fixedVariableCount: 3,
+    queryBatch: (batch) =>
+      db.all<{ threadId: string; eventCount: number; maxSequence: number }>(sql`
+        SELECT
+          ${events.threadId} AS threadId,
+          COUNT(*) AS eventCount,
+          MAX(${events.sequence}) AS maxSequence
+        FROM ${events} INDEXED BY events_background_task_thread_type_item_sequence_idx
+        WHERE ${inArray(events.threadId, [...batch])}
+          AND ${events.itemKind} ${sql.raw("= 'backgroundTask'")}
+          AND ${inArray(events.type, [
+            "item/started",
+            "item/backgroundTask/progress",
+            "item/backgroundTask/completed",
+          ])}
+        GROUP BY ${events.threadId}
+      `),
+    values: threadIds,
+    variableCountPerValue: 1,
+  });
+  return new Map(
+    rows.map((row) => [row.threadId, `${row.eventCount}:${row.maxSequence}`]),
+  );
+}
+
 export function listActiveBackgroundTaskCountsByThreadIds(
+  db: DbQueryConnection,
+  args: ListActiveBackgroundTaskCountsByThreadIdsArgs,
+): ActiveBackgroundTaskCountRow[] {
+  const threadIds = [...new Set(args.threadIds)];
+  if (threadIds.length === 0) return [];
+  let cache = activeBackgroundTaskCountCaches.get(db);
+  if (cache === undefined) {
+    cache = new Map();
+    activeBackgroundTaskCountCaches.set(db, cache);
+  }
+  const watermarks = listBackgroundTaskEventWatermarks(db, threadIds);
+  const keyOf = (threadId: string) =>
+    `${getThreadEventRewriteGeneration(threadId)}:${watermarks.get(threadId) ?? "none"}`;
+  const stale = threadIds.filter(
+    (threadId) => cache.get(threadId)?.key !== keyOf(threadId),
+  );
+  const fresh = new Map(
+    stale.length === 0
+      ? []
+      : listActiveBackgroundTaskCountsByThreadIdsUncached(db, {
+          threadIds: stale,
+        }).map((row) => [row.threadId, row]),
+  );
+  const staleThreadIds = new Set(stale);
+  const rows: ActiveBackgroundTaskCountRow[] = [];
+  for (const threadId of threadIds) {
+    const row = staleThreadIds.has(threadId)
+      ? fresh.get(threadId)
+      : cache.get(threadId)?.row;
+    if (row !== null && row !== undefined) rows.push({ ...row });
+  }
+  for (const threadId of stale) {
+    cache.delete(threadId);
+    cache.set(threadId, {
+      key: keyOf(threadId),
+      row: fresh.get(threadId) ?? null,
+    });
+  }
+  while (cache.size > ACTIVE_BACKGROUND_TASK_COUNT_CACHE_MAX_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+  return rows.sort((left, right) =>
+    left.threadId < right.threadId ? -1 : left.threadId > right.threadId ? 1 : 0,
+  );
+}
+
+export function listActiveBackgroundTaskCountsByThreadIdsUncached(
   db: DbQueryConnection,
   args: ListActiveBackgroundTaskCountsByThreadIdsArgs,
 ): ActiveBackgroundTaskCountRow[] {
@@ -4155,113 +4363,76 @@ export function pruneTokenUsageEventsInTransaction(
   });
 }
 
+function listOpenBackgroundTaskItemRows(
+  db: DbQueryConnection,
+  scopedThreads: SQL,
+): OpenBackgroundTaskItemRow[] {
+  return db.all<OpenBackgroundTaskItemRow>(sql`
+    WITH scoped_threads AS MATERIALIZED (${scopedThreads}),
+    latest_host_background_task AS MATERIALIZED (
+      SELECT event.thread_id, event.item_id,
+        MAX(CASE
+          WHEN event.type IN ('item/started', 'item/backgroundTask/progress')
+          THEN event.sequence
+        END) AS sequence,
+        MAX(CASE
+          WHEN event.type = 'item/backgroundTask/completed' THEN 1
+          ELSE 0
+        END) AS is_completed
+      FROM scoped_threads scoped
+      CROSS JOIN events event INDEXED BY events_background_task_thread_type_item_sequence_idx
+      WHERE event.thread_id = scoped.id AND event.item_kind = 'backgroundTask'
+        AND event.type IN ('item/started', 'item/backgroundTask/progress', 'item/backgroundTask/completed')
+        AND event.item_id IS NOT NULL
+      GROUP BY event.thread_id, event.item_id
+    ),
+    completed_background_tasks AS MATERIALIZED (
+      SELECT event.thread_id, event.item_id
+      FROM scoped_threads scoped
+      CROSS JOIN events event INDEXED BY events_thread_type_item_kind_sequence_idx
+      WHERE event.item_kind IS NOT 'backgroundTask'
+        AND event.thread_id = scoped.id AND event.type = 'item/backgroundTask/completed'
+        AND event.item_id IS NOT NULL
+      GROUP BY event.thread_id, event.item_id
+    )
+    SELECT
+      event.data,
+      scoped.environment_id AS environmentId,
+      event.item_id AS itemId,
+      event.provider_thread_id AS providerThreadId,
+      event.thread_id AS threadId
+    FROM latest_host_background_task latest
+    JOIN events event
+      ON event.thread_id = latest.thread_id
+        AND event.sequence = latest.sequence
+    JOIN scoped_threads scoped ON scoped.id = event.thread_id
+    LEFT JOIN completed_background_tasks completed
+      ON completed.thread_id = latest.thread_id
+        AND completed.item_id = latest.item_id
+    WHERE latest.is_completed = 0 AND latest.sequence IS NOT NULL
+      AND completed.item_id IS NULL
+    ORDER BY event.thread_id, event.item_id
+  `);
+}
+
 export function listOpenBackgroundTaskItemRowsForHost(
   db: DbQueryConnection,
   args: ListOpenBackgroundTaskItemRowsForHostArgs,
 ): OpenBackgroundTaskItemRow[] {
-  const startedType = "item/started" satisfies ThreadEventType;
-  const progressType = "item/backgroundTask/progress" satisfies ThreadEventType;
-  const completedType =
-    "item/backgroundTask/completed" satisfies ThreadEventType;
-  const settled = alias(events, "settled_background_task");
-
-  const rows = db
-    .select({
-      data: events.data,
-      environmentId: threads.environmentId,
-      itemId: events.itemId,
-      providerThreadId: events.providerThreadId,
-      threadId: events.threadId,
-    })
-    .from(events)
-    .innerJoin(threads, eq(events.threadId, threads.id))
-    .innerJoin(environments, eq(threads.environmentId, environments.id))
-    .where(
-      and(
-        eq(environments.hostId, args.hostId),
-        eq(events.itemKind, "backgroundTask"),
-        inArray(events.type, [startedType, progressType]),
-        isNotNull(events.itemId),
-        notExists(
-          db
-            .select({ one: sql`1` })
-            .from(settled)
-            .where(
-              and(
-                eq(settled.threadId, events.threadId),
-                eq(settled.itemId, events.itemId),
-                eq(settled.type, completedType),
-              ),
-            ),
-        ),
-        sql`${events.sequence} = (
-          SELECT MAX(latest.sequence)
-          FROM events latest
-          WHERE latest.thread_id = ${events.threadId}
-            AND latest.item_id = ${events.itemId}
-            AND latest.type IN (${startedType}, ${progressType})
-        )`,
-      ),
-    )
-    .orderBy(events.threadId, events.itemId)
-    .all();
-
-  return rows.flatMap((row) =>
-    row.itemId === null ? [] : [{ ...row, itemId: row.itemId }],
-  );
+  return listOpenBackgroundTaskItemRows(db, sql`
+    SELECT thread.id, thread.environment_id
+    FROM environments environment
+    JOIN threads thread INDEXED BY threads_environment_idx
+      ON thread.environment_id = environment.id
+    WHERE environment.host_id = ${args.hostId}
+  `);
 }
 
 export function listOpenBackgroundTaskItemRowsForThread(
   db: DbQueryConnection,
   args: ListOpenBackgroundTaskItemRowsForThreadArgs,
 ): OpenBackgroundTaskItemRow[] {
-  const startedType = "item/started" satisfies ThreadEventType;
-  const progressType = "item/backgroundTask/progress" satisfies ThreadEventType;
-  const completedType =
-    "item/backgroundTask/completed" satisfies ThreadEventType;
-  const settled = alias(events, "settled_thread_background_task");
-
-  const rows = db
-    .select({
-      data: events.data,
-      environmentId: threads.environmentId,
-      itemId: events.itemId,
-      providerThreadId: events.providerThreadId,
-      threadId: events.threadId,
-    })
-    .from(events)
-    .innerJoin(threads, eq(events.threadId, threads.id))
-    .where(
-      and(
-        eq(events.threadId, args.threadId),
-        eq(events.itemKind, "backgroundTask"),
-        inArray(events.type, [startedType, progressType]),
-        isNotNull(events.itemId),
-        notExists(
-          db
-            .select({ one: sql`1` })
-            .from(settled)
-            .where(
-              and(
-                eq(settled.threadId, events.threadId),
-                eq(settled.itemId, events.itemId),
-                eq(settled.type, completedType),
-              ),
-            ),
-        ),
-        sql`${events.sequence} = (
-          SELECT MAX(latest.sequence)
-          FROM events latest
-          WHERE latest.thread_id = ${events.threadId}
-            AND latest.item_id = ${events.itemId}
-            AND latest.type IN (${startedType}, ${progressType})
-        )`,
-      ),
-    )
-    .orderBy(events.itemId)
-    .all();
-
-  return rows.flatMap((row) =>
-    row.itemId === null ? [] : [{ ...row, itemId: row.itemId }],
-  );
+  return listOpenBackgroundTaskItemRows(db, sql`
+    SELECT id, environment_id FROM threads WHERE id = ${args.threadId}
+  `);
 }

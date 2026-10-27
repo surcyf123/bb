@@ -1729,7 +1729,7 @@ function selectThreadConversationOutline(
     threadId: thread.id,
   });
   const decodedRawEvents = rawEventRows.map((row) =>
-    toThreadEventWithMeta(row),
+    withRowMeta(row, decodeStoredEventRowCached(db, row)),
   );
   const decodedEvents = compactThreadTimelineSummaryEvents(
     decodedRawEvents,
@@ -1745,10 +1745,10 @@ function selectThreadConversationOutline(
   });
   const acceptedClientRequestContext: AcceptedClientRequestContext = {
     acceptedClientRequestEvents: clientRequestContextRows.acceptedRows.map(
-      (row) => toThreadEventWithMeta(row),
+      (row) => withRowMeta(row, decodeStoredEventRowCached(db, row)),
     ),
     rejectedClientRequestEvents: clientRequestContextRows.rejectedRows.map(
-      (row) => toThreadEventWithMeta(row),
+      (row) => withRowMeta(row, decodeStoredEventRowCached(db, row)),
     ),
   };
   return {

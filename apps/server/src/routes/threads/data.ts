@@ -1,6 +1,10 @@
 import { extractThreadContextWindowUsage } from "@bb/thread-view";
 import { clearTimelineOrderingContextCache } from "../../services/threads/timeline-context-order.js";
 import {
+  buildThreadTimelineOffThread,
+  readConversationOutlineOffThread,
+} from "../../services/threads/off-thread-reads.js";
+import {
   getAppSettings,
   getDatabaseDataVersion,
   getThreadPluginMetadata,
@@ -8,6 +12,7 @@ import {
   getLatestCompletedThreadContextClearSequence,
   listContextWindowUsageRows,
   getLatestThreadSequence,
+  getThreadEventRewriteGeneration,
   getLatestStoredConversationOutlineSequence,
   listQueuedThreadMessages,
 } from "@bb/db";
@@ -213,6 +218,9 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     ThreadConversationOutlineResponse["items"]
   >();
   const CONVERSATION_OUTLINE_CACHE_MAX_ENTRIES = 128;
+  const offThreadTarget = deps.db.$client.memory
+    ? null
+    : { databasePath: deps.db.$client.name, logger: deps.logger };
   const resolveConversationRowsOptions = (thread: Thread) => {
     const providerDisplayName = resolveThreadProviderDisplayName(
       deps,
@@ -284,7 +292,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     });
   });
 
-  get(routes.timeline, (context, query) => {
+  get(routes.timeline, async (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
     const page = parseThreadTimelinePage(query);
     const includeNestedRows = query.includeNestedRows === "true";
@@ -320,10 +328,43 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
       includeDiagnosticOperations,
       completedTurnDisplay,
     };
-    const full = timelineCache.getOrBuild(
-      thread.id,
-      buildThreadTimelineCacheKey({ ...keyArgs, maxSeq }),
-      () => {
+    const cacheKey = buildThreadTimelineCacheKey({ ...keyArgs, maxSeq });
+    const planCommand = resolveProviderPlanCommand(
+      deps.providerRegistry,
+      thread.providerId,
+    );
+    let offThread = timelineCache.get(cacheKey);
+    if (offThread === undefined && offThreadTarget !== null) {
+      const built = await buildThreadTimelineOffThread(
+        offThreadTarget,
+        {
+          threadId: thread.id,
+          rewriteGeneration: getThreadEventRewriteGeneration(thread.id),
+          thread,
+          options: {
+            completedTurnDisplay,
+            deferContent,
+            eventBudget,
+            includeClearedContextHistory,
+            includeDiagnosticOperations,
+            includeNestedRows,
+            maxSeq,
+            page,
+            planCommand,
+            ...(providerDisplayName === undefined ? {} : { providerDisplayName }),
+            summaryOnly,
+          },
+        },
+        cacheKey,
+      );
+      if (built !== null) {
+        slowTimelineBuildLogger.log({ profile: built.profile, threadId: thread.id });
+        offThread = timelineCache.getOrBuild(thread.id, cacheKey, () => built.full);
+      }
+    }
+    const full =
+      offThread ??
+      timelineCache.getOrBuild(thread.id, cacheKey, () => {
         const { profile, response } = buildThreadTimelineWithProfile(
           deps.db,
           thread,
@@ -338,10 +379,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
             maxSeq,
             page,
             providerDisplayName,
-            planCommand: resolveProviderPlanCommand(
-              deps.providerRegistry,
-              thread.providerId,
-            ),
+            planCommand,
             summaryOnly,
           },
         );
@@ -353,8 +391,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
         return includeNestedRows
           ? truncated
           : previewTimelineResponseOutputs(truncated);
-      },
-    );
+      });
 
     const afterSequence = parseOptionalInteger(
       query.afterSequence,
@@ -381,8 +418,20 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     );
   });
 
-  get(routes.conversationOutline, (context, query) => {
+  get(routes.conversationOutline, async (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
+    if (offThreadTarget !== null && query.role === undefined) {
+      const { maxSeq: _maxSeq, ...outlineOptions } =
+        resolveConversationRowsOptions(thread);
+      const body = await readConversationOutlineOffThread(offThreadTarget, {
+        threadId: thread.id,
+        rewriteGeneration: getThreadEventRewriteGeneration(thread.id),
+        outlineOptions,
+      });
+      if (body !== null) {
+        return context.body(body, 200, { "Content-Type": "application/json" });
+      }
+    }
     const selectItems = (items: ThreadConversationOutlineResponse["items"]) =>
       query.role === undefined
         ? items

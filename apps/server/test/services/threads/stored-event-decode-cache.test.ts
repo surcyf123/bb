@@ -21,6 +21,7 @@ import {
   decodeStoredEventRowCached,
   readStoredEventDecodeCacheSize,
   setStoredEventDecodeCacheFreezeForTesting,
+  setStoredEventDecodeCacheLimits,
   STORED_EVENT_DECODE_CACHE_MAX_DATA_CHARS,
   STORED_EVENT_DECODE_CACHE_MAX_ENTRIES,
 } from "../../../src/services/threads/stored-event-decode-cache.js";
@@ -176,6 +177,32 @@ describe("stored event decode cache", () => {
     for (const row of rows.slice(-40)) {
       const decoded = decodeStoredEventRowCached(db, { ...row });
       expect(decodeStoredEventRowCached(db, { ...row })).toBe(decoded);
+    }
+  });
+
+  it("keeps every row of a larger history once the limits are raised", () => {
+    const rowChars = 20_000;
+    const rows = Array.from({ length: 800 }, (_, index) => ({
+      ...message,
+      data: agentMessageData("x".repeat(rowChars)),
+      id: `evt_raised_${index}`,
+    }));
+    setStoredEventDecodeCacheLimits({
+      maxEntries: STORED_EVENT_DECODE_CACHE_MAX_ENTRIES,
+      maxDataChars: rows.length * rowChars * 4,
+    });
+    try {
+      clearStoredEventDecodeCache(db);
+      const decoded = rows.map((row) => decodeStoredEventRowCached(db, row));
+      rows.forEach((row, index) => {
+        expect(decodeStoredEventRowCached(db, { ...row })).toBe(decoded[index]);
+      });
+    } finally {
+      setStoredEventDecodeCacheLimits({
+        maxEntries: STORED_EVENT_DECODE_CACHE_MAX_ENTRIES,
+        maxDataChars: STORED_EVENT_DECODE_CACHE_MAX_DATA_CHARS,
+      });
+      clearStoredEventDecodeCache(db);
     }
   });
 });
