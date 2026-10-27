@@ -165,8 +165,9 @@ export function findThreadEvent(
 export function getLastThreadOutput(
   db: DbConnection,
   threadId: string,
+  turnId?: string,
 ): string | null {
-  const row = getLatestThreadOutputEventRow(db, { threadId });
+  const row = getLatestThreadOutputEventRow(db, { threadId, turnId });
 
   if (!row) return null;
 

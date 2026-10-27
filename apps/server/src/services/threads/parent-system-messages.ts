@@ -1,5 +1,9 @@
 import {
   getLatestThreadSequence,
+  deleteClaimedQueuedThreadMessageBatchInTransaction,
+  type ClaimedQueuedThreadMessageRow,
+
+
   getEnvironment,
   getHost,
   getThread,
@@ -54,6 +58,7 @@ import {
   ThreadContextClearInProgressError,
   withThreadSendGuard,
 } from "./thread-context-mutation-guard.js";
+import { createQueuedMessageClaimLostError } from "./queue-waits.js";
 import { requestQueuedMessageDispatch } from "./queued-message-dispatch.js";
 
 const PARENT_SYSTEM_MESSAGE_SOURCE = "tell";
@@ -113,6 +118,7 @@ interface RenderedParentSystemSlotParts {
 }
 
 interface QueueReadyParentSystemMessageArgs extends ParentSystemMessageTaxonomy {
+  claimedQueuedMessages?: readonly ClaimedQueuedThreadMessageRow[];
   environment: ReadyThreadEnvironment;
   execution: ResolvedThreadExecutionOptions;
   input: PromptInput[];
@@ -220,6 +226,20 @@ export function buildParentSystemThreadMention(
   };
 }
 
+function consumeParentSystemQueuedMessages(
+  tx: DbTransaction,
+  args: { claimedQueuedMessages?: readonly ClaimedQueuedThreadMessageRow[] },
+): void {
+  if (
+    args.claimedQueuedMessages &&
+    !deleteClaimedQueuedThreadMessageBatchInTransaction(tx, {
+      queuedMessages: args.claimedQueuedMessages,
+    })
+  ) {
+    throw createQueuedMessageClaimLostError();
+  }
+}
+
 function queueActiveParentSystemMessageInTransaction(
   tx: DbTransaction,
   args: QueueActiveParentSystemMessageInTransactionArgs,
@@ -236,6 +256,7 @@ function queueActiveParentSystemMessageInTransaction(
   }
 
   const expectedSteerTurnId = getActiveTurnId({ db: tx }, args.thread.id);
+  consumeParentSystemQueuedMessages(tx, args);
   const request = appendClientTurnEventInTransaction(tx, {
     ...parentSystemTurnRequestFields(args),
     target: {
@@ -262,7 +283,7 @@ async function queueActiveParentSystemMessage(
   const expectedSteerTurnId = getActiveTurnId(deps, args.thread.id);
   if (expectedSteerTurnId === null) {
     const outcome = queueInputForStartingTurn(deps, {
-      claimed: null,
+      claimed: args.claimedQueuedMessages ?? null,
       input: {
         input: args.input,
         execution: args.execution,
@@ -384,6 +405,7 @@ async function queueReadyParentSystemMessage(
   const activeThread: Thread | null = deps.db.transaction(
     (tx) => {
       ensureThreadCanStartRequest(args.thread);
+      consumeParentSystemQueuedMessages(tx, args);
       appendPreparedClientTurnRequestedEventWithNotificationInTransaction(tx, {
         ...parentSystemTurnRequestFields(args),
         target: { kind: "new-turn" },
@@ -511,6 +533,7 @@ export async function queueParentSystemMessage(
 }
 
 interface DeliverParentSystemMessageArgs extends ParentSystemMessageTaxonomy {
+  claimedQueuedMessages?: readonly ClaimedQueuedThreadMessageRow[];
   input: PromptInput[];
   parentThread: Thread;
 }
@@ -547,6 +570,8 @@ async function deliverParentSystemMessageWithContextGuard(
   );
   if (
     await dispatchTurnDuringReprovision({
+      beforeRequestAppendInTransaction: ({ tx }) =>
+        consumeParentSystemQueuedMessages(tx, args),
       deps,
       environment,
       execution,
@@ -565,6 +590,7 @@ async function deliverParentSystemMessageWithContextGuard(
     getEnvironment(deps.db, environment.id) ?? environment,
   );
   return await queueReadyParentSystemMessage(deps, {
+    claimedQueuedMessages: args.claimedQueuedMessages,
     thread: parentThread,
     input: args.input,
     execution,

@@ -136,7 +136,6 @@ function nextCheckpoint(
   previous: Checkpoint,
   orderingBoundarySequence: number | null,
 ): Checkpoint {
-  if (hasBackgroundState(projection.events)) return previous;
   const activeTurns = new Set<string>();
   const pendingRequests = new Set<string>();
   let completedBoundary = previous.sequenceStart;
@@ -180,7 +179,12 @@ function nextCheckpoint(
     if (event.scope.kind === "turn") turnIds.add(event.scope.turnId);
     const parentId = parentItemId(event);
     if (parentId !== null) parentItemIds.add(parentId);
-    if ("item" in event && event.item.type === "toolCall")
+    if (
+      "item" in event &&
+      (event.item.type === "toolCall" ||
+        event.item.type === "backgroundTask" ||
+        event.item.type === "delegation")
+    )
       parentItemIds.add(event.item.id);
     const requestId = referencedRequestId(event);
     if (requestId !== null) requestIds.add(requestId);

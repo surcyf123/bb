@@ -1,3 +1,4 @@
+import { recoverChildThreadNotifications } from "./child-thread-notifications.js";
 import { ensureHostSessionReadyForWork } from "../hosts/host-lifecycle.js";
 import { isMachineWaitingForExecution } from "../machines/lifecycle.js";
 import { isServerMoveFrozen } from "../server-move/freeze-state.js";
@@ -274,6 +275,7 @@ async function executePreparedQueuedMessageDispatch(
       await runDueScheduledDispatch(deps, wake.now);
       return;
     case "idle-recovery":
+      await recoverChildThreadNotifications(deps);
       releaseStaleQueuedMessageDispatchClaims(deps, wake.now);
       await runIdleThreadRecovery(deps);
       return;

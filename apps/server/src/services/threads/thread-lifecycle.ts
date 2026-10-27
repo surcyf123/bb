@@ -858,14 +858,19 @@ function settleThreadCommandFailure(
   if (hasExpectedTurnCompletedEvent(args.deps, args.command)) {
     return emptyCommandResultSideEffects();
   }
+  const failureScope = getThreadFailureCommandErrorScope(args.command);
   appendSystemErrorEventInTransaction(args.deps, {
     threadId: thread.id,
     environmentId: thread.environmentId,
     code: "thread_command_failed",
     message: `Command ${args.report.type} failed`,
     detail: args.report.errorMessage,
-    scope: getThreadFailureCommandErrorScope(args.command),
+    scope: failureScope,
   });
+  const failureSource =
+    failureScope.kind === "turn"
+      ? `${failureScope.turnId}:failed`
+      : `${getLatestThreadSequence(args.deps.db, { threadId: thread.id })}:failed:`;
   const outcome = applyLoggedThreadLifecycleEventInTransaction(args.deps, {
     event: { type: "run.failed" },
     threadId: thread.id,
@@ -878,6 +883,10 @@ function settleThreadCommandFailure(
     postCommitActions.push({
       run: (deps) =>
         queueChildThreadTurnNotificationBestEffort(deps, {
+          sourceKey: `${parentThreadId}:${thread.id}:${failureSource}`,
+          ...(failureScope.kind === "turn"
+            ? { sourceTurnId: failureScope.turnId }
+            : {}),
           childThread: thread,
           parentThreadId,
           turnStatus: "failed",
@@ -1899,6 +1908,8 @@ function interruptActiveThreads(
       isParentNotifiableChildThread(thread)
     ) {
       void queueChildThreadTurnNotificationBestEffort(deps, {
+        sourceKey: `${thread.parentThreadId}:${thread.id}:${result.interruptedTurnId}:interrupted`,
+        sourceTurnId: result.interruptedTurnId,
         childThread: thread,
         parentThreadId: thread.parentThreadId,
         turnStatus: "interrupted",

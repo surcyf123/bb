@@ -279,7 +279,11 @@ describe("recordQueuedMessageDrainFailure", () => {
       // when the host comes back, so presenting it as an error would be wrong.
       expect(queued.failureReason).toBeNull();
       // A drain failure changes the row, not the transcript.
-      expect(listEvents(harness.db, { threadId: thread.id })).toEqual([]);
+      expect(
+        listEvents(harness.db, { threadId: thread.id }).map(
+          (event) => JSON.parse(event.data).rawType,
+        ),
+      ).toEqual(["queue/enqueued"]);
     });
   });
 
@@ -303,7 +307,11 @@ describe("recordQueuedMessageDrainFailure", () => {
       // wrong last time, not what the row is waiting for, and a queue would
       // have erased it on the very next attempt.
       expect(queued.waitingOn).toEqual({ kind: "thread-busy" });
-      expect(listEvents(harness.db, { threadId: thread.id })).toEqual([]);
+      expect(
+        listEvents(harness.db, { threadId: thread.id }).map(
+          (event) => JSON.parse(event.data).rawType,
+        ),
+      ).toEqual(["queue/enqueued"]);
     });
   });
 

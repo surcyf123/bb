@@ -479,7 +479,11 @@ async function sendClaimedQueuedMessageForIdleProviderThread(
   const queuedMessages = args.queuedMessages.map(toThreadQueuedMessage);
   const queuedMessage = queuedMessages[0]!;
 
-  const senderThreadId = args.queuedMessages[0]!.senderThreadId;
+  const senderThreadId = args.queuedMessages.every(
+    (row) => row.senderThreadId === args.queuedMessages[0]!.senderThreadId,
+  )
+    ? args.queuedMessages[0]!.senderThreadId
+    : null;
   let inputGroups = args.queuedMessages.map((claimedQueuedMessage) =>
     formatQueuedMessageInputForSender({
       input: toThreadQueuedMessage(claimedQueuedMessage).content,
@@ -505,7 +509,7 @@ async function sendClaimedQueuedMessageForIdleProviderThread(
     senderThreadId,
   );
   const initiator: ThreadTurnInitiator =
-    senderThreadId === null ? "user" : "agent";
+    args.queuedMessages[0]!.senderThreadId === null ? "user" : "agent";
   // A retry row's model is provenance — the failed attempt's tuple, replayed —
   // not a model the user picked for this row, so it must not become the
   // thread's sticky override the way a composed queued message's choice does.
@@ -619,7 +623,10 @@ async function sendClaimedQueuedMessageForIdleProviderThread(
       );
     },
   });
-  settleQueueRowDispatched({ row: args.queuedMessages[0]! });
+  for (const row of args.queuedMessages) {
+    if (getQueuedThreadMessage(deps.db, row.id) === null)
+      settleQueueRowDispatched({ row });
+  }
   return queuedMessage;
 }
 
@@ -645,6 +652,7 @@ async function sendClaimedSystemNotice(
   );
   const queuedMessage = toThreadQueuedMessage(lead);
   const delivered = await deliverParentSystemMessage(deps, {
+    claimedQueuedMessages: args.queuedMessages,
     input: queuedMessage.content,
     parentThread: args.thread,
     systemMessageKind: notice.kind,
@@ -655,17 +663,10 @@ async function sendClaimedSystemNotice(
     // by the caller's error path rather than consuming a notice nobody got.
     throw createQueuedMessageClaimLostError();
   }
-  const consumed = deps.db.transaction(
-    (tx) =>
-      deleteClaimedQueuedThreadMessageBatchInTransaction(tx, {
-        queuedMessages: args.queuedMessages,
-      }),
-    { behavior: "immediate" },
-  );
-  if (!consumed) {
-    throw createQueuedMessageClaimLostError();
+  for (const row of args.queuedMessages) {
+    if (getQueuedThreadMessage(deps.db, row.id) === null)
+      settleQueueRowDispatched({ row });
   }
-  settleQueueRowDispatched({ row: lead });
   return queuedMessage;
 }
 
@@ -893,26 +894,15 @@ export async function sendNextQueuedMessageIfPresent(
       }),
     );
   } catch (error) {
-    releaseQueuedMessageClaims(deps, nextQueuedMessages);
-    if (
-      isQueuedMessageClaimLostError(error) ||
-      isQueuedMessageAutoSendPausedError(error) ||
-      error instanceof ThreadContextClearInProgressError
-    ) {
-      return false;
-    }
-    // Nobody is listening to this attempt, so the row itself has to carry what
-    // happened — either as a `host-offline` wait it can recover from, or as a
-    // failure reason the queued row renders. A host timeout is excluded: the
-    // command is still in flight, so the attempt has not failed yet.
-    if (!isCommandTimeoutError(error)) {
-      recordQueuedMessageDrainFailure(deps, {
-        error,
-        now: Date.now(),
-        row: nextQueuedMessages[0]!,
-        thread,
-      });
-    }
+    const claimChanged = isQueuedMessageClaimLostError(error) || isQueuedMessageAutoSendPausedError(error) || error instanceof ThreadContextClearInProgressError;
+    const now = Date.now();
+    deps.db.transaction(() => {
+      releaseQueuedMessageClaims(deps, nextQueuedMessages);
+      if (!claimChanged && !isCommandTimeoutError(error)) {
+        for (const row of nextQueuedMessages) recordQueuedMessageDrainFailure(deps, { error, now, row, thread });
+      }
+    }, { behavior: "immediate" });
+    if (claimChanged) return false;
     throw error;
   }
   return true;

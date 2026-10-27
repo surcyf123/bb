@@ -166,6 +166,7 @@ export function queueChildSetupFailureNotification(
     childThread: thread,
     parentThreadId: thread.parentThreadId,
     turnStatus: "failed",
+    sourceKey: `${thread.parentThreadId}:${thread.id}:${getLatestThreadSequence(deps.db, { threadId: thread.id })}:failed:`,
     failureContext: "failed during workspace setup before a turn began",
   });
 }

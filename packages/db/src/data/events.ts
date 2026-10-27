@@ -361,6 +361,7 @@ export interface ThreadTurnInterruptionEventState {
 
 interface InsertStoredEventRowArgs {
   attachmentOwnership: ProjectAttachmentOwnershipMode;
+  captureChildNotification?: boolean;
   conflict: "error" | "ignore";
   createdAt: number;
   data: string;
@@ -413,6 +414,31 @@ function insertStoredEventRow(
     )`);
   if (result.changes === 0) {
     return { id, inserted: false };
+  }
+  if (args.captureChildNotification !== false && ((args.type === "turn/completed" && args.scopeKind === "turn" && args.parentToolCallId === null) || (args.type === "system/error" && ["thread_command_failed", "thread_provisioning_failed"].includes(JSON.parse(args.data).code)))) {
+    const status = args.type === "turn/completed" ? JSON.parse(args.data).status : "failed";
+    const data = args.type === "turn/completed" ? args.data : JSON.stringify({ status, ...(JSON.parse(args.data).code === "thread_provisioning_failed" ? { failureContext: "failed during workspace setup before a turn began" } : {}) });
+    const sourceTurn = args.turnId ?? String(args.sequence);
+    const sourceSuffix = args.turnId === null ? ":" : "";
+    if (typeof status === "string" && ["completed", "failed", "interrupted"].includes(status)) db.run(sql`INSERT OR IGNORE INTO bb_local_child_notification_outbox
+      (source_key, parent_thread_id, child_thread_id, turn_id, data, interruption_data, created_at)
+      SELECT child.parent_thread_id || ':' || child.id || ':' || ${sourceTurn} || ':' || ${status} || ${sourceSuffix},
+        child.parent_thread_id, child.id, ${args.turnId}, ${data},
+        (SELECT intr.data FROM events intr WHERE intr.thread_id = child.id AND intr.type = 'system/thread/interrupted' AND intr.sequence < ${args.sequence}
+          AND intr.sequence > COALESCE((SELECT MAX(start.sequence) FROM events start WHERE start.thread_id = child.id AND start.turn_id = ${args.turnId} AND start.type = 'turn/started'), ${args.sequence}) ORDER BY intr.sequence DESC LIMIT 1),
+        ${args.createdAt}
+      FROM threads child JOIN threads parent ON parent.id = child.parent_thread_id
+      WHERE child.id = ${args.threadId} AND child.origin_kind IS NULL AND child.deleted_at IS NULL AND parent.deleted_at IS NULL AND parent.archived_at IS NULL
+        AND (${args.type} = 'system/error' OR EXISTS (SELECT 1 FROM events start WHERE start.thread_id = child.id AND start.turn_id = ${args.turnId} AND start.type = 'turn/started' AND start.scope_kind = 'turn' AND start.parent_tool_call_id IS NULL))
+        AND NOT (${args.type} = 'system/error' AND ${args.turnId} IS NOT NULL AND EXISTS (SELECT 1 FROM events completed WHERE completed.scope_kind = 'turn' AND completed.parent_tool_call_id IS NULL AND completed.thread_id = child.id AND completed.turn_id = ${args.turnId} AND completed.type = 'turn/completed' AND json_extract(completed.data, '$.status') = 'interrupted'))
+        AND NOT EXISTS (SELECT 1 FROM bb_local_child_notification_receipts receipt WHERE receipt.source_key = child.parent_thread_id || ':' || child.id || ':' || ${sourceTurn} || ':' || ${status} || ${sourceSuffix})`);
+  }
+  if (args.captureChildNotification !== false && args.type === "system/thread/interrupted") {
+    db.run(sql`UPDATE bb_local_child_notification_outbox SET interruption_data = ${args.data}
+      WHERE child_thread_id = ${args.threadId} AND json_extract(data, '$.status') = 'interrupted'
+        AND turn_id = (SELECT completed.turn_id FROM events completed WHERE completed.thread_id = ${args.threadId} AND completed.type = 'turn/completed' AND json_extract(completed.data, '$.status') = 'interrupted' AND completed.sequence < ${args.sequence}
+          AND NOT EXISTS (SELECT 1 FROM events later_start WHERE later_start.thread_id = completed.thread_id AND later_start.type = 'turn/started' AND later_start.parent_tool_call_id IS NULL AND later_start.sequence > completed.sequence AND later_start.sequence < ${args.sequence})
+          ORDER BY completed.sequence DESC LIMIT 1)`);
   }
   if (args.type === "client/turn/requested") {
     acquireProjectAttachmentOwnership(
@@ -885,6 +911,7 @@ export function copyStoredThreadEventsInTransaction(
   for (const row of args.rows) {
     const insertResult = insertStoredEventRow(db, {
       attachmentOwnership: "best-effort",
+      captureChildNotification: false,
       conflict: "error",
       createdAt: row.createdAt,
       data: row.data,
@@ -1293,6 +1320,7 @@ export interface GetLatestCompletedThreadContextClearSequenceArgs {
 
 export interface GetLatestThreadOutputEventRowArgs {
   threadId: string;
+  turnId?: string;
 }
 
 export interface GetLatestThreadSystemErrorEventRowArgs {
@@ -3421,7 +3449,7 @@ export function getLatestThreadOutputEventRow(
       .select(storedEventRowFields)
       .from(events)
       .where(
-        sql`${events.threadId} = ${args.threadId} AND (
+        sql`${events.threadId} = ${args.threadId} ${args.turnId === undefined ? sql`` : sql`AND ${events.turnId} = ${args.turnId} AND ${events.parentToolCallId} IS NULL`} AND (
         (
           ${events.type} = 'system/manager/user_message'
           AND COALESCE(json_extract(${events.data}, '$.text'), '') <> ''

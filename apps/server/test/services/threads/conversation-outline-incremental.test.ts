@@ -215,6 +215,50 @@ function countSelectedEventRows(
 }
 
 describe("incremental conversation outlines", () => {
+  it.each([true, false])(
+    "reuses background history and invalidates late cross-boundary updates (settled=%s)",
+    (settled) => {
+      withTestThread((testThread) => {
+        const kind = "backgroundTask";
+        const work = (index: number, complete: boolean): RowSpec => {
+          const id = `historical-work-${index}`;
+          const status = complete ? "completed" : "pending";
+          return {
+            type: complete ? "item/completed" : "item/started",
+            turnId: `historical-turn-${index}`,
+            itemId: id,
+            itemKind: kind,
+            data: {
+              item: { id, type: kind, taskType: "local_bash", description: "Fixture work", status, taskStatus: complete ? "completed" : "running", skipTranscript: false },
+            },
+          };
+        };
+        appendRows(testThread, [
+          ...Array.from({ length: 100 }, (_, index) => [
+            started(`historical-turn-${index}`),
+            work(index, false),
+            ...(index === 0 && !settled ? [] : [work(index, true)]),
+            message(`historical-turn-${index}`, `Historical answer ${index}`),
+            completed(`historical-turn-${index}`),
+          ]).flat(),
+          started("live"), delta("live", "Live"),
+        ]);
+        expectMatchesFull(testThread);
+        appendRows(testThread, [delta("live", " continued")]);
+        const ordinary = countSelectedEventRows(testThread, () => expectMatchesFull(testThread));
+        expect(ordinary).toBeLessThan(20);
+        appendRows(testThread, [
+          started("late-child", "historical-work-0"),
+          message("late-child", "Late answer", "historical-work-0"),
+        ]);
+        const late = countSelectedEventRows(testThread, () => expectMatchesFull(testThread));
+        expect(late).toBeGreaterThan(100);
+        appendRows(testThread, [work(0, false)]);
+        expectMatchesFull(testThread);
+      });
+    },
+  );
+
   it.each(["collapse", "flat"] as const)(
     "retains completed nested history while updating the live tail (%s)",
     (display) => {

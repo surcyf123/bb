@@ -18,6 +18,14 @@ export const appSettingsSchema = z
     showKeyboardHints: z.boolean(),
     showGitChanges: z.boolean(),
     steerActiveThreadOnEnter: z.boolean(),
+    batchReadyQueuedMessages: z.boolean().default(false),
+    readyQueueSenderCap: z.number().int().min(0).max(100).default(0),
+    childOutcomeBatchWindowMs: z
+      .number()
+      .int()
+      .min(0)
+      .max(300_000)
+      .default(2_000),
     confirmThreadArchive: z.boolean(),
     showDiagnosticEvents: z.boolean(),
     keepHistoryAfterContextClear: z.boolean(),
@@ -54,6 +62,9 @@ export const defaultAppSettings: AppSettings = {
   showKeyboardHints: true,
   showGitChanges: true,
   steerActiveThreadOnEnter: true,
+  batchReadyQueuedMessages: false,
+  readyQueueSenderCap: 0,
+  childOutcomeBatchWindowMs: 2_000,
   confirmThreadArchive: true,
   showDiagnosticEvents: false,
   keepHistoryAfterContextClear: false,
@@ -74,6 +85,9 @@ export const disabledProviderIdsSchema = z.array(z.string().min(1));
 
 export const appSettingsUpdateSchema = z.union([
   appSettingsSchema.extend({
+    batchReadyQueuedMessages: appSettingsSchema.shape.batchReadyQueuedMessages.unwrap().optional(),
+    readyQueueSenderCap: appSettingsSchema.shape.readyQueueSenderCap.unwrap().optional(),
+    childOutcomeBatchWindowMs: appSettingsSchema.shape.childOutcomeBatchWindowMs.unwrap().optional(),
     allowFastServiceTier: z.boolean().optional(),
     telemetryEnabled: z.boolean().optional(),
     confirmThreadArchive: z.boolean().optional(),
@@ -83,6 +97,9 @@ export const appSettingsUpdateSchema = z.union([
     onboardingCompletedAt: z.string().min(1).nullable().optional(),
   }),
   appSettingsSchema.omit({ showDiagnosticEvents: true }).extend({
+    batchReadyQueuedMessages: appSettingsSchema.shape.batchReadyQueuedMessages.unwrap().optional(),
+    readyQueueSenderCap: appSettingsSchema.shape.readyQueueSenderCap.unwrap().optional(),
+    childOutcomeBatchWindowMs: appSettingsSchema.shape.childOutcomeBatchWindowMs.unwrap().optional(),
     allowFastServiceTier: z.boolean().optional(),
     telemetryEnabled: z.boolean().optional(),
     confirmThreadArchive: z.boolean().optional(),

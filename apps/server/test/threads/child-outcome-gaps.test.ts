@@ -158,7 +158,7 @@ describe("child outcomes without provider completion", () => {
     },
   );
 
-  it("keeps each interruption cause attached to its child in a batch", async () => {
+  it("dispatches interruption notices urgently and retains each child cause", async () => {
     await withTestHarness(async (harness) => {
       const { parent, child } = seedParentAndChild(harness, "idle");
       const sibling = seedThread(harness.deps, {
@@ -196,32 +196,20 @@ describe("child outcomes without provider completion", () => {
         expect(parentSystemRequests(harness, parent.id)).toHaveLength(1),
       );
       const [notice] = parentSystemRequests(harness, parent.id);
-      expect(notice?.systemMessageKind).toBe("child-outcome-batch");
-      expect(notice?.systemMessageSubject).toEqual({
-        kind: "thread-batch",
-        count: 2,
-        outcomes: [
-          {
-            threadId: child.id,
-            status: "interrupted",
-            interruption: {
-              reason: "host-daemon-restarted",
-              cause: "host-connection-lost",
-            },
-          },
-          {
-            threadId: sibling.id,
-            status: "interrupted",
-            interruption: { reason: "host-daemon-restarted" },
-          },
-        ],
-      });
-      expect(JSON.stringify(notice?.input)).toContain(
-        `@thread:${child.id} was interrupted because its host connection was lost`,
-      );
-      expect(JSON.stringify(notice?.input)).toContain(
-        `@thread:${sibling.id} was interrupted because its host daemon restarted`,
-      );
+      expect(notice?.systemMessageKind).toBe("child-interrupted");
+      const remaining = listQueuedThreadMessages(harness.db, parent.id);
+      expect(remaining).toHaveLength(1);
+      const queuedNotice = JSON.parse(remaining[0]!.systemNotice!);
+      expect(queuedNotice.kind).toBe("child-interrupted");
+      const outcomes = [notice?.systemMessageSubject, queuedNotice.subject].flatMap((subject) => subject?.outcomes ?? []);
+      expect(outcomes).toEqual(expect.arrayContaining([
+        { threadId: child.id, status: "interrupted", interruption: { reason: "host-daemon-restarted", cause: "host-connection-lost" } },
+        { threadId: sibling.id, status: "interrupted", interruption: { reason: "host-daemon-restarted" } },
+      ]));
+      expect(outcomes).toHaveLength(2);
+      const text = JSON.stringify(notice?.input) + remaining[0]!.content;
+      expect(text).toContain(`@thread:${child.id} was interrupted because its host connection was lost`);
+      expect(text).toContain(`@thread:${sibling.id} was interrupted because its host daemon restarted`);
     });
   });
 

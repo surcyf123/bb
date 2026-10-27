@@ -1,3 +1,4 @@
+import { setOutlineCacheSlowWriteReporter } from "./services/threads/conversation-outline-persistence.js";
 import { serve } from "@hono/node-server";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -7,6 +8,7 @@ import { isLoopbackHostname } from "@bb/config/loopback";
 import { toOptionalString } from "@bb/config/strings";
 import { createLogger } from "@bb/logger";
 import {
+  recoverQueueCutover,
   getAppSettings,
   getDisabledProviderIds,
   listRunningThreads,
@@ -118,6 +120,14 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     dataDir: serverConfig.BB_DATA_DIR,
     logger,
   });
+  setOutlineCacheSlowWriteReporter((write) =>
+    logger.warn(write, "Slow conversation outline cache write"),
+  );
+  const queueCutover = recoverQueueCutover(db);
+  if (queueCutover.phase === "held" || queueCutover.phase === "retry") {
+    logger.error({ queueCutover }, "Queue cutover requires reconciliation; source event range remains durable");
+  }
+
   const serverImport = await applyServerImportAtBoot({
     dataDir: serverConfig.BB_DATA_DIR,
     db,

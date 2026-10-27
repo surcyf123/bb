@@ -1775,6 +1775,9 @@ describe("migrate", () => {
       runMigrationFile({ db, migrationPath: appSettingsKeyValueMigrationPath });
 
       expect(getAppSettings(db)).toEqual({
+        batchReadyQueuedMessages: false,
+        readyQueueSenderCap: 0,
+        childOutcomeBatchWindowMs: 2000,
         showKeyboardHints: false,
         showGitChanges: true,
         steerActiveThreadOnEnter: true,

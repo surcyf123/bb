@@ -1,5 +1,9 @@
+import * as threadEvents from "../../src/services/threads/thread-events.js";
+import { sendNextQueuedMessageIfPresent, sendQueuedMessageNow } from "../../src/services/threads/queued-messages.js";
 import {
   createQueuedThreadMessage,
+  getAppSettings,
+  setAppSettings,
   listEvents,
   listQueuedThreadMessages,
   setQueuedThreadMessageFailureReason,
@@ -64,6 +68,7 @@ function installHooks(registry: HookRegistry): void {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   setPluginHookProvider(undefined);
   vi.useRealTimers();
 });
@@ -125,6 +130,122 @@ async function stopThread(harness: TestAppHarness, threadId: string) {
 }
 
 describe("the requested queue drain", () => {
+  it.each(["idle", "active"] as const)("rolls back a %s parent system-notice append and delivers once on retry", async (status) => {
+    await withTestHarness(async (harness) => {
+      const { thread } = seedRunnableThread(harness, { hostId: `host-system-rollback-${status}`, status });
+      const queued = createQueuedThreadMessage(harness.db, harness.deps.hub, {
+        threadId: thread.id, content: textInput("DURABLE_CHILD_RESULT"), senderThreadId: null,
+        model: "gpt-5.3-codex", reasoningLevel: "medium", permissionMode: "full",
+        serviceTier: "default", waitingOn: { kind: "time" }, sendAt: Date.now() - 1,
+        payload: { kind: "inline" }, systemNotice: { kind: "child-completed", subject: null },
+      });
+      const before = turnRequests(harness, thread.id).length;
+      const fail = vi.spyOn(threadEvents, status === "active" ? "appendClientTurnEventInTransaction" : "appendPreparedClientTurnRequestedEventWithNotificationInTransaction")
+        .mockImplementation(() => { throw new Error("parent system append failed"); });
+      const send = () => sendQueuedMessageNow(harness.deps, { threadId: thread.id, queuedMessageId: queued.id, mode: "auto" });
+      await expect(send()).rejects.toThrow("parent system append failed");
+      fail.mockRestore();
+      expect(listQueuedThreadMessages(harness.db, thread.id)).toMatchObject([{ id: queued.id, claimedAt: null }]);
+      expect(turnRequests(harness, thread.id)).toHaveLength(before);
+      expect(await send()).toEqual({ delivery: "sent" });
+      expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual([]);
+      expect(turnRequests(harness, thread.id)).toHaveLength(before + 1);
+      expect(JSON.stringify(turnRequests(harness, thread.id).at(-1))).toContain("DURABLE_CHILD_RESULT");
+    });
+  });
+
+  it("retains every sender row with a shared retry delay when an automatic batch fails", async () => {
+    await withTestHarness(async (harness) => {
+      const { thread } = seedRunnableThread(harness, { hostId: "host-batch-failure", status: "idle" });
+      setAppSettings(harness.db, { ...getAppSettings(harness.db), batchReadyQueuedMessages: true });
+      const firstSender = seedThread(harness.deps, { projectId: thread.projectId, status: "idle" });
+      const secondSender = seedThread(harness.deps, { projectId: thread.projectId, status: "idle" });
+      for (const sender of [firstSender, secondSender]) seedQueuedMessage(harness.deps, { threadId: thread.id, senderThreadId: sender.id, content: textInput(sender.id), waitingOn: { kind: "thread-busy" } });
+      const before = turnRequests(harness, thread.id).length;
+      const fail = vi.spyOn(threadEvents, "appendClientTurnEventInTransaction").mockImplementation(() => { throw new Error("dispatch append failed"); });
+      await expect(sendNextQueuedMessageIfPresent(harness.deps, { threadId: thread.id })).rejects.toThrow("dispatch append failed");
+      fail.mockRestore();
+      const rows = listQueuedThreadMessages(harness.db, thread.id);
+      expect(rows).toHaveLength(2);
+      expect(rows.every((row) => row.failureCount === 1 && row.claimedAt === null && row.nextAttemptAt! > Date.now())).toBe(true);
+      expect(rows[0]!.nextAttemptAt).toBe(rows[1]!.nextAttemptAt);
+      expect(await sendNextQueuedMessageIfPresent(harness.deps, { threadId: thread.id })).toBe(false);
+      expect(turnRequests(harness, thread.id)).toHaveLength(before);
+    });
+  });
+
+  it.each([false, true])(
+    "preserves each sender when batching through dispatch hooks=%s",
+    async (hooks) => {
+      await withTestHarness(async (harness) => {
+        const { thread } = seedRunnableThread(harness, {
+          hostId: `host-batch-attribution-${hooks}`,
+          status: "idle",
+        });
+        setAppSettings(harness.db, {
+          ...getAppSettings(harness.db),
+          batchReadyQueuedMessages: true,
+        });
+        const firstSender = seedThread(harness.deps, {
+          projectId: thread.projectId,
+          status: "idle",
+        });
+        const secondSender = seedThread(harness.deps, {
+          projectId: thread.projectId,
+          status: "idle",
+        });
+        if (hooks)
+          installHooks({
+            "message.dispatch": [
+              {
+                pluginId: "batch-test",
+                handler: async () => ({ action: "proceed" }),
+              },
+            ],
+          });
+        const before = turnRequests(harness, thread.id).length;
+        const first = seedQueuedMessage(harness.deps, {
+          threadId: thread.id,
+          senderThreadId: firstSender.id,
+          content: textInput("FIRST_RESULT"),
+          waitingOn: { kind: "thread-busy" },
+        });
+        const second = seedQueuedMessage(harness.deps, {
+          threadId: thread.id,
+          senderThreadId: secondSender.id,
+          content: textInput("SECOND_RESULT"),
+          waitingOn: { kind: "thread-busy" },
+        });
+        await runQueuedMessageDispatch(harness.deps, {
+          kind: "thread-ready",
+          threadId: thread.id,
+        });
+        const requests = turnRequests(harness, thread.id).slice(before);
+        expect(requests).toHaveLength(1);
+        const request = turnRequestEventDataSchema.parse(
+          JSON.parse(requests[0]!.data),
+        );
+        expect(request.initiator).toBe("agent");
+        expect(request.senderThreadId).toBeNull();
+        expect(JSON.stringify(request.input)).toContain(
+          `[bb message from thread:${firstSender.id}]`,
+        );
+        expect(JSON.stringify(request.input)).toContain(
+          `[bb message from thread:${secondSender.id}]`,
+        );
+        expect(JSON.stringify(request.input)).toContain("FIRST_RESULT");
+        expect(JSON.stringify(request.input)).toContain("SECOND_RESULT");
+        expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual([]);
+        const dispatched = listEvents(harness.db, { threadId: thread.id })
+          .filter((event) => event.type === "provider/unhandled" && JSON.parse(event.data).rawType === "queue/dispatched")
+          .map((event) => JSON.parse(event.data).rawEvent.params.queuedMessageId);
+        expect(dispatched.sort()).toEqual([first.id, second.id].sort());
+      });
+    },
+  );
+
+
+
   it.each([
     { finish: "save", sentText: "SAVED EDIT" },
     { finish: "cancel", sentText: "ORIGINAL" },

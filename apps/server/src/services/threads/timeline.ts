@@ -2,6 +2,7 @@ import {
   projectConversationOutlineIncrementally,
   type ConversationOutlineSelection,
 } from "./conversation-outline-cache.js";
+import { persistThreadConversationOutline } from "./conversation-outline-persistence.js";
 import { paginateTimelineContents } from "./timeline-content-pagination.js";
 import {
   deferSettledTimelineContent,
@@ -88,7 +89,6 @@ import {
   listStoredTurnStartedRowsByTurnIdsUpToSequence,
   listTimelineWindowHintsDescending,
   scopedItemRefKey,
-  upsertThreadConversationOutlineRecord,
 } from "@bb/db";
 import type {
   DbConnection,
@@ -1958,7 +1958,7 @@ export function loadThreadConversationOutline(
     },
   );
   if (shouldMaterializeThreadConversationOutline(thread)) {
-    upsertThreadConversationOutlineRecord(db, {
+    persistThreadConversationOutline(db, {
       itemsJson: JSON.stringify(response.items),
       projectionKey,
       threadId: thread.id,
