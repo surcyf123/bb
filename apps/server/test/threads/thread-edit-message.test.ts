@@ -36,6 +36,10 @@ import {
   seedThread,
 } from "../helpers/seed.js";
 import { withTestHarness, type TestAppHarness } from "../helpers/test-app.js";
+import {
+  queueAuditMethods,
+  withoutQueueAuditEvents,
+} from "../helpers/queue-audit-events.js";
 
 const MESSAGE_EDIT_PROVIDERS = ["codex", "pi", "claude-code"] as const;
 const MESSAGE_EDIT_SCENARIOS = [
@@ -1206,7 +1210,12 @@ describe("editThreadMessage", () => {
       });
       await reportQueuedCommandSuccess(harness, discard, {});
       await rejectedEdit;
-      expect(listEvents(harness.db, { threadId: thread.id })).toHaveLength(11);
+      expect(
+        withoutQueueAuditEvents(listEvents(harness.db, { threadId: thread.id })),
+      ).toHaveLength(11);
+      expect(
+        queueAuditMethods(listEvents(harness.db, { threadId: thread.id })),
+      ).toEqual(["queue/enqueued"]);
     });
   });
 
