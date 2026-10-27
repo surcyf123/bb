@@ -13,6 +13,10 @@ import {
 } from "../helpers/commands.js";
 import { readJson } from "../helpers/json.js";
 import {
+  queueAuditMethods,
+  withoutQueueAuditEvents,
+} from "../helpers/queue-audit-events.js";
+import {
   seedEnvironment,
   seedHost,
   seedHostSession,
@@ -128,9 +132,9 @@ describe("offline host follow-ups", () => {
           mentions: [],
         },
       ];
-      const eventCountBeforeSend = listEvents(harness.db, {
-        threadId: thread.id,
-      }).length;
+      const eventCountBeforeSend = withoutQueueAuditEvents(
+        listEvents(harness.db, { threadId: thread.id }),
+      ).length;
 
       const response = await harness.app.request(
         `/api/v1/threads/${thread.id}/send`,
@@ -165,9 +169,12 @@ describe("offline host follow-ups", () => {
         sendAt: null,
         failureReason: null,
       });
-      expect(listEvents(harness.db, { threadId: thread.id })).toHaveLength(
-        eventCountBeforeSend,
-      );
+      expect(
+        withoutQueueAuditEvents(listEvents(harness.db, { threadId: thread.id })),
+      ).toHaveLength(eventCountBeforeSend);
+      expect(
+        queueAuditMethods(listEvents(harness.db, { threadId: thread.id })),
+      ).toEqual(["queue/enqueued"]);
 
       const reconnectSession = seedSession(harness.deps, host.id);
       const reconnectSocket = registerTestHostRpcCapture(harness.deps, {
@@ -218,7 +225,9 @@ describe("offline host follow-ups", () => {
         target: { mode: "start" },
       });
       expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual([]);
-      expect(listEvents(harness.db, { threadId: thread.id })).toHaveLength(
+      expect(
+        withoutQueueAuditEvents(listEvents(harness.db, { threadId: thread.id })),
+      ).toHaveLength(
         eventCountBeforeSend + 1,
       );
     });

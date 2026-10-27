@@ -71,6 +71,10 @@ import {
 } from "../helpers/seed.js";
 import { installFakeEnvironmentProvider } from "../helpers/environment-provider.js";
 import { withTestHarness } from "../helpers/test-app.js";
+import {
+  queueAuditMethods,
+  withoutQueueAuditEvents,
+} from "../helpers/queue-audit-events.js";
 
 const queuedMessageIdResponseSchema = z.object({
   id: z.string(),
@@ -2851,13 +2855,13 @@ describe("public thread data routes", () => {
       ]);
       // Nothing was dispatched, and queueing writes no timeline event at all:
       // the queue rows above the composer are the only narration of a wait.
-      expect(
-        harness.db
-          .select({ type: events.type })
-          .from(events)
-          .where(eq(events.threadId, thread.id))
-          .all(),
-      ).toEqual([]);
+      const storedEvents = harness.db
+        .select({ type: events.type, data: events.data })
+        .from(events)
+        .where(eq(events.threadId, thread.id))
+        .all();
+      expect(withoutQueueAuditEvents(storedEvents)).toEqual([]);
+      expect(queueAuditMethods(storedEvents)).toEqual(["queue/enqueued"]);
       expect(capture).not.toHaveBeenCalled();
     });
   });
@@ -2961,7 +2965,12 @@ describe("public thread data routes", () => {
       const requestedEvent = harness.db
         .select({ data: events.data })
         .from(events)
-        .where(eq(events.threadId, thread.id))
+        .where(
+          and(
+            eq(events.threadId, thread.id),
+            eq(events.type, "client/turn/requested"),
+          ),
+        )
         .get();
       const requestedData = clientTurnRequestedDataSchema.parse(
         requestedEvent ? JSON.parse(requestedEvent.data) : null,
