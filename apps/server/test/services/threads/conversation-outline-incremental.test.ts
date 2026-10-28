@@ -6,6 +6,9 @@ import {
 import {
   advanceThreadPruning,
   deleteThreadEventSuffixInTransaction,
+  getThreadEventRewriteGeneration,
+  getThreadEventStructuralGeneration,
+  syncThreadEventRewriteGeneration,
   createThread,
   noopNotifier,
   getLatestStoredConversationOutlineSequence,
@@ -1004,7 +1007,7 @@ describe("incremental conversation outlines", () => {
       0,
       ));
 
-    it("rebuilds when a frozen event is deleted without a rewrite", () =>
+    it("rebuilds when a pruning pass removes a frozen non-prunable event", () =>
       withWorkerConfiguration(() =>
         withTestThread((testThread) => {
           history(testThread, 20);
@@ -1015,6 +1018,11 @@ describe("incremental conversation outlines", () => {
               "DELETE FROM events WHERE thread_id = ? AND item_id = 'message-old-3'",
             )
             .run(testThread.thread.id);
+          syncThreadEventRewriteGeneration(
+            testThread.thread.id,
+            getThreadEventRewriteGeneration(testThread.thread.id) + 1,
+            getThreadEventStructuralGeneration(testThread.thread.id),
+          );
           const rows = countSelectedEventRows(testThread, () =>
             expectMatchesFull(testThread),
           );
