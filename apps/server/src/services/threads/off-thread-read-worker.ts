@@ -19,7 +19,10 @@ import {
   buildThreadTimelineWithProfile,
   loadThreadConversationOutline,
 } from "./timeline.js";
-import { clearTimelineOrderingContextCache } from "./timeline-context-order.js";
+import {
+  clearTimelineOrderingContextCache,
+  configureTimelineOrderingContextCache,
+} from "./timeline-context-order.js";
 import {
   DEFAULT_MAX_INLINE_OUTPUT_CHARS,
   truncateTimelineResponseOutputs,
@@ -96,6 +99,7 @@ configureConversationOutlineCache({
   },
   deferAudits: true,
 });
+configureTimelineOrderingContextCache({ requireUnchangedDataVersion: false });
 const db = createConnection(databasePath);
 db.$client.pragma("query_only = ON");
 const outlineItemsCache = new Map<string, string>();

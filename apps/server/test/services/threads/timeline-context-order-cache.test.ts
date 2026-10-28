@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import { THREAD_CONTEXT_CLEAR_OPERATION } from "@bb/domain";
 import {
   advanceThreadPruning,
+  createConnection,
   deleteThreadEventSuffixInTransaction,
   getLatestCompletedThreadContextClearSequence,
   getLatestThreadSequence,
 } from "@bb/db";
 import {
   clearTimelineOrderingContextCache,
+  configureTimelineOrderingContextCache,
   getTimelineGroupingContext,
 } from "../../../src/services/threads/timeline-context-order.js";
 import {
@@ -524,6 +526,54 @@ describe("timeline grouping context cache", () => {
     expect(comparisons).toBeGreaterThan(SEEDS * 100);
     expect(changedContexts).toBeGreaterThan(SEEDS * 10);
     expect(prunedRows).toBeGreaterThan(0);
+  }, 60_000);
+
+  it("matches a cold computation from a reader connection that ignores data_version", () => {
+    configureTimelineOrderingContextCache({ requireUnchangedDataVersion: false });
+    let comparisons = 0;
+    let readsAfterWrite = 0;
+    let reusedAfterWrite = 0;
+    try {
+      for (let seed = 1; seed <= SEEDS; seed += 1) {
+        const random = createRandom(seed);
+        withTestThread((testThread) => {
+          const reader = createConnection(testThread.db.$client.name);
+          try {
+            for (let step = 0; step < 40; step += 1) {
+              applyRandomStep(testThread, random, step);
+              const latest = getLatestThreadSequence(testThread.db, {
+                threadId: testThread.thread.id,
+              });
+              const probes = [latest, latest - randomInteger(random, 1, 6), latest];
+              for (const [probe, maxSeq] of probes.entries()) {
+                if (maxSeq < 0) continue;
+                const args = { maxSeq, sequenceStart: 0, threadId: testThread.thread.id };
+                const statements = captureStatementSql(reader, () => {
+                  const cached = getTimelineGroupingContext(reader, args);
+                  clearTimelineOrderingContextCache(testThread.coldDb);
+                  expect(cached, JSON.stringify(args)).toEqual(
+                    getTimelineGroupingContext(testThread.coldDb, args),
+                  );
+                });
+                comparisons += 1;
+                if (probe === 0 && step > 0) {
+                  readsAfterWrite += 1;
+                  if (!statements.some((sql) => sql.includes("$.target.expectedTurnId")))
+                    reusedAfterWrite += 1;
+                }
+              }
+            }
+          } finally {
+            clearTimelineOrderingContextCache(reader);
+            reader.$client.close();
+          }
+        });
+      }
+    } finally {
+      configureTimelineOrderingContextCache({ requireUnchangedDataVersion: true });
+    }
+    expect(comparisons).toBeGreaterThan(SEEDS * 100);
+    expect(reusedAfterWrite).toBeGreaterThan(readsAfterWrite / 8);
   }, 60_000);
 });
 

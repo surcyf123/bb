@@ -52,6 +52,14 @@ export function clearTimelineOrderingContextCache(db: DbConnection): void {
   orderingContexts.delete(db);
 }
 
+let requireUnchangedDataVersion = true;
+
+export function configureTimelineOrderingContextCache(options: {
+  requireUnchangedDataVersion: boolean;
+}): void {
+  requireUnchangedDataVersion = options.requireUnchangedDataVersion;
+}
+
 function nearestEntry(
   entries: readonly TimelineGroupingContextEntry[],
   maxSeq: number,
@@ -111,7 +119,8 @@ export function getTimelineGroupingContext(
   const dataVersion = getDatabaseDataVersion(db);
   const entries = (cache.get(key) ?? []).filter(
     (entry) =>
-      entry.generation === generation && entry.dataVersion === dataVersion,
+      entry.generation === generation &&
+      (!requireUnchangedDataVersion || entry.dataVersion === dataVersion),
   );
   cache.delete(key);
   const reusable = findReusableEntry(db, args, entries);
