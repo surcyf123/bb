@@ -472,15 +472,15 @@ export function projectConversationOutlineIncrementally(args: {
     entry.contextBoundarySeq === args.contextBoundarySeq &&
     entry.structuralGeneration === structuralGeneration &&
     entry.maxSeq <= args.maxSeq &&
-    prefixFingerprint(args.db, args.threadId, entry.checkpoint.sequenceStart) ===
-      entry.checkpoint.prefixFingerprint &&
     (entry.generation === generation ||
-      reconcilePrunedDeltas(
-        args.db,
-        args.threadId,
-        args.contextBoundarySeq,
-        entry,
-      ));
+      (prefixFingerprint(args.db, args.threadId, entry.checkpoint.sequenceStart) ===
+        entry.checkpoint.prefixFingerprint &&
+        reconcilePrunedDeltas(
+          args.db,
+          args.threadId,
+          args.contextBoundarySeq,
+          entry,
+        )));
   const externalUserBoundarySequence =
     reusable && entry.externalUserBoundarySequence !== null
       ? entry.externalUserBoundarySequence
