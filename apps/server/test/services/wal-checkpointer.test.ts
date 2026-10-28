@@ -57,18 +57,71 @@ describe("background WAL checkpointer", { timeout: 30_000 }, () => {
     expect(log.warn).not.toHaveBeenCalled();
   });
 
-  it("restores automatic checkpoints when the worker stops reporting", async () => {
+  it("keeps a slow checkpoint running instead of giving up on it", async () => {
     const { db } = fileDatabase();
     const log = logger();
     const checkpointer = startBackgroundWalCheckpointer(db, log, {
-      intervalMs: 5_000,
-      staleMs: 200,
+      intervalMs: 50,
+      staleMs: 300,
+      workerSource: `
+const { parentPort } = require("node:worker_threads");
+setInterval(() => {
+  parentPort.postMessage({ phase: "start" });
+  const started = Date.now();
+  while (Date.now() - started < 900) {}
+  parentPort.postMessage({ ok: true, durationMs: 900 });
+}, 50);`,
     });
-    await delay(1_000);
+    try {
+      await delay(2_500);
+      expect(checkpointer?.stopped).toBe(false);
+      expect(checkpointer?.restarts).toBe(0);
+      expect(autocheckpointPages(db)).toBe(0);
+      expect(log.info).toHaveBeenCalledWith(
+        expect.objectContaining({ runningMs: expect.any(Number) }),
+        "Background WAL checkpoint still running",
+      );
+    } finally {
+      checkpointer?.stop();
+    }
+  });
+
+  it("restarts a hung worker without returning checkpoints to the writer", async () => {
+    const { db } = fileDatabase();
+    const log = logger();
+    const checkpointer = startBackgroundWalCheckpointer(db, log, {
+      intervalMs: 50,
+      staleMs: 200,
+      workerSource: `setTimeout(() => { while (true) {} }, 10);`,
+    });
+    try {
+      await delay(700);
+      expect(checkpointer?.stopped).toBe(false);
+      expect(checkpointer?.restarts).toBeGreaterThanOrEqual(1);
+      expect(autocheckpointPages(db)).toBe(0);
+      expect(log.warn).toHaveBeenCalledWith(
+        { reason: "stale" },
+        "Background WAL checkpointer restarted",
+      );
+    } finally {
+      checkpointer?.stop();
+    }
+  });
+
+  it("restores automatic checkpoints when the worker keeps crashing", async () => {
+    const { db } = fileDatabase();
+    const log = logger();
+    const checkpointer = startBackgroundWalCheckpointer(db, log, {
+      intervalMs: 50,
+      staleMs: 200,
+      workerSource: "process.exit(3);",
+    });
+    await delay(1_500);
     expect(checkpointer?.stopped).toBe(true);
+    expect(checkpointer?.restarts).toBe(5);
     expect(autocheckpointPages(db)).toBe(1_000);
     expect(log.warn).toHaveBeenCalledWith(
-      { reason: "stale" },
+      { reason: "exit; 5 restarts in 10 min" },
       "Background WAL checkpointer stopped; restored automatic checkpoints",
     );
   });
