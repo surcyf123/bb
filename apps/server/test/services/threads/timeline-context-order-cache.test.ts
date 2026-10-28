@@ -63,6 +63,47 @@ function captureStatementSql(db: TestThread["db"], run: () => void): string[] {
   return captured;
 }
 
+function captureStatementParameters(
+  db: TestThread["db"],
+  run: () => void,
+): { sql: string; parameters: unknown[] }[] {
+  const captured: { sql: string; parameters: unknown[] }[] = [];
+  const raw = db.$client;
+  const originalPrepare = raw.prepare.bind(raw);
+  const record = (sql: string, statement: object): object =>
+    new Proxy(statement, {
+      get(target, property, receiver) {
+        const value: unknown = Reflect.get(target, property, receiver);
+        if (typeof value !== "function") return value;
+        if (property === "raw" || property === "pluck" || property === "expand") {
+          return (...args: unknown[]) =>
+            record(sql, Reflect.apply(value, target, args) as object);
+        }
+        return (...args: unknown[]) => {
+          if (property === "all" || property === "get" || property === "iterate") {
+            captured.push({ sql, parameters: args });
+          }
+          return Reflect.apply(value, target, args);
+        };
+      },
+    });
+  Object.defineProperty(raw, "prepare", {
+    configurable: true,
+    writable: true,
+    value: (source: string) => record(source, originalPrepare(source)),
+  });
+  try {
+    run();
+  } finally {
+    Object.defineProperty(raw, "prepare", {
+      configurable: true,
+      writable: true,
+      value: originalPrepare,
+    });
+  }
+  return captured;
+}
+
 function turnStarted(turnId: string): RowSpec {
   return { turnId, type: "turn/started" };
 }
@@ -379,6 +420,35 @@ describe("timeline grouping context cache", () => {
       expect(
         expectCachedEqualsCold(testThread, maxSeq).orderingBoundarySequence,
       ).toBe(testCase.after);
+    });
+  });
+
+  it("extends the ordering scan from where it stopped when a new turn arrives", () => {
+    withTestThread((testThread) => {
+      appendRows(testThread, [
+        turnStarted("turn-1"),
+        userRequest("request-1"),
+        accepted("request-1", "turn-1"),
+        turnCompleted("turn-1"),
+      ]);
+      const warmSeq = appendRows(testThread, [delta("turn-1", "done")]);
+      expectCachedEqualsCold(testThread, warmSeq);
+      const maxSeq = appendRows(testThread, [
+        userRequest("request-2"),
+        turnStarted("turn-2"),
+        accepted("request-2", "turn-2"),
+      ]);
+      const statements = captureStatementParameters(testThread.db, () => {
+        expectCachedEqualsCold(testThread, maxSeq);
+      });
+      const scans = statements.filter(
+        ({ sql }) =>
+          sql.includes("events_thread_type_sequence_idx") &&
+          sql.includes("$.target.expectedTurnId"),
+      );
+      expect(scans).toHaveLength(1);
+      expect(scans[0]!.parameters).toContain(warmSeq + 1);
+      expect(scans[0]!.parameters).not.toContain(0);
     });
   });
 
