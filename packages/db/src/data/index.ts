@@ -313,6 +313,7 @@ export {
   listStoredConversationOutlineEventRows,
   listTimelineWindowHintsDescending,
   getFirstParentedTimelineBoundarySequence,
+  getFirstParentedTimelineBoundarySequenceSince,
   getTimelineGroupingContextChangesInRange,
   listStoredEventRowsInSequenceRange,
   listTimelineOrderingContext,
