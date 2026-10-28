@@ -26,10 +26,16 @@ interface TimelineGroupingContextArgs {
   threadId: string;
 }
 
+type TimelineOrderingContextRow = ReturnType<
+  typeof listTimelineOrderingContext
+>[number];
+
 interface TimelineOrderingContext {
   acceptedTurnIds: ReadonlyMap<string, string>;
   boundarySequence: number | null;
   boundaryScanThroughSequence: number;
+  rows: readonly TimelineOrderingContextRow[];
+  rowsThroughSequence: number;
 }
 
 interface TimelineGroupingContextEntry {
@@ -88,10 +94,16 @@ function findReusableEntry(
   args: TimelineGroupingContextArgs,
   entries: readonly TimelineGroupingContextEntry[],
 ):
-  | { entry: TimelineGroupingContextEntry; parentedChanged: boolean }
+  | {
+      entry: TimelineGroupingContextEntry;
+      parentedChanged: boolean;
+      orderingChanged: boolean;
+    }
   | undefined {
   const exact = entries.find((entry) => entry.maxSeq === args.maxSeq);
-  if (exact !== undefined) return { entry: exact, parentedChanged: false };
+  if (exact !== undefined) {
+    return { entry: exact, parentedChanged: false, orderingChanged: false };
+  }
   for (const side of ["below", "above"] as const) {
     const entry = nearestEntry(entries, args.maxSeq, side);
     if (entry === undefined) continue;
@@ -100,9 +112,12 @@ function findReusableEntry(
       threadId: args.threadId,
       throughSequence: Math.max(entry.maxSeq, args.maxSeq),
     });
-    if (changes.ordering) continue;
+    if (changes.ordering) {
+      if (side === "above") continue;
+      return { entry, parentedChanged: true, orderingChanged: true };
+    }
     if (!changes.parented && side === "below") entry.maxSeq = args.maxSeq;
-    return { entry, parentedChanged: changes.parented };
+    return { entry, parentedChanged: changes.parented, orderingChanged: false };
   }
   return undefined;
 }
@@ -140,7 +155,11 @@ export function getTimelineGroupingContext(
     exactReusable ??
     (prunedReusable === undefined
       ? undefined
-      : { entry: prunedReusable.entry, parentedChanged: true });
+      : {
+          entry: prunedReusable.entry,
+          parentedChanged: true,
+          orderingChanged: prunedReusable.orderingChanged,
+        });
   if (reusable !== undefined && !reusable.parentedChanged) {
     cache.set(key, [
       reusable.entry,
@@ -149,7 +168,14 @@ export function getTimelineGroupingContext(
     return reusable.entry.context;
   }
   const orderingContext =
-    reusable?.entry.orderingContext ?? computeTimelineOrderingContext(db, args);
+    reusable === undefined
+      ? computeTimelineOrderingContext(
+          listTimelineOrderingContext(db, args),
+          args.maxSeq,
+        )
+      : reusable.orderingChanged
+        ? extendTimelineOrderingContext(db, args, reusable.entry.orderingContext)
+        : reusable.entry.orderingContext;
   const parentedBoundary = getFirstParentedTimelineBoundarySequence(db, args);
   const context: TimelineGroupingContext = {
     acceptedTurnIds: orderingContext.acceptedTurnIds,
@@ -177,11 +203,28 @@ export function getTimelineGroupingContext(
   return context;
 }
 
-function computeTimelineOrderingContext(
+function extendTimelineOrderingContext(
   db: DbConnection,
   args: TimelineGroupingContextArgs,
+  previous: TimelineOrderingContext,
 ): TimelineOrderingContext {
-  const context = listTimelineOrderingContext(db, args);
+  return computeTimelineOrderingContext(
+    [
+      ...previous.rows,
+      ...listTimelineOrderingContext(db, {
+        maxSeq: args.maxSeq,
+        sequenceStart: previous.rowsThroughSequence + 1,
+        threadId: args.threadId,
+      }),
+    ],
+    args.maxSeq,
+  );
+}
+
+function computeTimelineOrderingContext(
+  context: readonly TimelineOrderingContextRow[],
+  rowsThroughSequence: number,
+): TimelineOrderingContext {
   const spans = new Map<string, ExternalUserBoundaryTurnSpan>();
   const accepted = new Map<string, { sequence: number; turnId: string }>();
   for (const row of context) {
@@ -279,6 +322,8 @@ function computeTimelineOrderingContext(
     acceptedTurnIds: new Map(
       [...accepted].map(([requestId, entry]) => [requestId, entry.turnId]),
     ),
+    rows: context,
+    rowsThroughSequence,
   };
 }
 
