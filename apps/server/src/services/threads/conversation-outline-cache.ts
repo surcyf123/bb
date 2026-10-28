@@ -15,6 +15,7 @@ interface ConversationOutlineProjection {
     item: ThreadConversationOutlineItem;
     sourceSeqStart: number;
     sourceSeqEnd: number;
+    trailing: boolean;
   }[];
 }
 
@@ -26,6 +27,7 @@ export interface ConversationOutlineSelection {
 interface Checkpoint {
   agentMessageDeltaCount: number;
   items: ThreadConversationOutlineItem[];
+  trailingItems: ThreadConversationOutlineItem[];
   sequenceStart: number;
   turnIds: Set<string>;
   requestIds: Set<string>;
@@ -38,6 +40,7 @@ interface Entry {
   checkpoint: Checkpoint;
   contextBoundarySeq: number;
   dataVersion: number;
+  externalUserBoundarySequence: number | null;
   generation: number;
   key: string;
   maxSeq: number;
@@ -182,13 +185,28 @@ function canReuse(
   });
 }
 
+function sortBySource(
+  items: ConversationOutlineProjection["items"],
+): ConversationOutlineProjection["items"] {
+  return items
+    .map((row, index) => ({ row, index }))
+    .sort(
+      (left, right) =>
+        left.row.sourceSeqStart - right.row.sourceSeqStart ||
+        left.row.sourceSeqEnd - right.row.sourceSeqEnd ||
+        left.index - right.index,
+    )
+    .map(({ row }) => row);
+}
+
 function nextCheckpoint(
   projection: ConversationOutlineProjection,
   previous: Checkpoint,
-  orderingBoundarySequence: number | null,
 ): Checkpoint {
   const activeTurns = new Set<string>();
   const pendingRequests = new Set<string>();
+  const pendingRequestOrder: string[] = [];
+  let rejectionAwaitsCompanionError = false;
   let completedBoundary = previous.sequenceStart;
   const candidates: number[] = [];
   for (const { event, meta } of projection.events) {
@@ -199,20 +217,28 @@ function nextCheckpoint(
       event.type === "client/turn/requested" &&
       (event.target.kind === "steer" ||
         (event.target.kind === "auto" && event.target.expectedTurnId !== null))
-    )
+    ) {
       pendingRequests.add(event.requestId);
+      pendingRequestOrder.push(event.requestId);
+    }
     if (event.type === "turn/input/accepted")
       pendingRequests.delete(event.clientRequestId);
     if (event.type === "client/turn/rejected")
       pendingRequests.delete(event.requestId);
+    if (
+      event.type === "system/error" &&
+      event.code === "thread_command_failed" &&
+      !rejectionAwaitsCompanionError
+    ) {
+      let requestId = pendingRequestOrder.pop();
+      while (requestId !== undefined && !pendingRequests.delete(requestId))
+        requestId = pendingRequestOrder.pop();
+    }
+    if (event.type !== "item/agentMessage/delta")
+      rejectionAwaitsCompanionError = event.type === "client/turn/rejected";
     if (event.scope.kind !== "turn") continue;
     if (event.type === "turn/started") {
-      if (
-        activeTurns.size === 0 &&
-        (orderingBoundarySequence === null ||
-          completedBoundary <= orderingBoundarySequence)
-      )
-        candidates.push(completedBoundary);
+      if (activeTurns.size === 0) candidates.push(completedBoundary);
       activeTurns.add(event.scope.turnId);
     }
     if (event.type === "turn/completed") {
@@ -244,6 +270,7 @@ function nextCheckpoint(
           meta.seq < boundary && event.type === "item/agentMessage/delta",
       ).length,
     items: previous.items,
+    trailingItems: previous.trailingItems,
     sequenceStart: boundary,
     turnIds,
     requestIds,
@@ -261,16 +288,18 @@ function nextCheckpoint(
     )
   )
     return previous;
-  let reachedTail = false;
-  const frozen: ThreadConversationOutlineItem[] = [];
+  const frozen = { main: [...previous.items], trailing: [...previous.trailingItems] };
+  const reachedTail = { main: false, trailing: false };
   for (const row of projection.items) {
-    if (row.sourceSeqStart >= boundary) reachedTail = true;
+    const group = row.trailing ? "trailing" : "main";
+    if (row.sourceSeqStart >= boundary) reachedTail[group] = true;
     else {
-      if (reachedTail) return previous;
-      frozen.push(row.item);
+      if (reachedTail[group]) return previous;
+      frozen[group].push(row.item);
     }
   }
-  checkpoint.items = [...previous.items, ...frozen];
+  checkpoint.items = frozen.main;
+  checkpoint.trailingItems = frozen.trailing;
   return checkpoint;
 }
 
@@ -280,7 +309,7 @@ export function projectConversationOutlineIncrementally(args: {
   key: string;
   maxSeq: number;
   contextBoundarySeq: number;
-  orderingBoundarySequence: number | null;
+  externalUserBoundarySequence: number | null;
   select: (
     sequenceStart: number,
     precedingAgentMessageDeltaCount: number,
@@ -301,6 +330,7 @@ export function projectConversationOutlineIncrementally(args: {
   const empty: Checkpoint = {
     agentMessageDeltaCount: 0,
     items: [],
+    trailingItems: [],
     sequenceStart: args.contextBoundarySeq,
     turnIds: new Set(),
     requestIds: new Set(),
@@ -313,8 +343,7 @@ export function projectConversationOutlineIncrementally(args: {
     (!requireUnchangedDataVersion || entry.dataVersion === dataVersion) &&
     entry.generation === generation &&
     entry.contextBoundarySeq === args.contextBoundarySeq &&
-    (args.orderingBoundarySequence === null ||
-      entry.checkpoint.sequenceStart <= args.orderingBoundarySequence) &&
+    entry.externalUserBoundarySequence === args.externalUserBoundarySequence &&
     entry.maxSeq <= args.maxSeq &&
     countEventsBefore(
       args.db,
@@ -347,16 +376,29 @@ export function projectConversationOutlineIncrementally(args: {
       ({ event }) => event.type === "item/agentMessage/delta",
     ).length;
   }
-  const projection = { events: selection.events, items: selection.project() };
+  const projected = selection.project();
+  const main = projected.filter(({ trailing }) => !trailing);
+  const trailing = projected.filter(({ trailing }) => trailing);
+  const projection = {
+    events: selection.events,
+    items: [
+      ...(checkpoint !== empty &&
+      args.externalUserBoundarySequence !== null &&
+      args.externalUserBoundarySequence <= checkpoint.sequenceStart
+        ? sortBySource(main)
+        : main),
+      ...trailing,
+    ],
+  };
   let items = [
     ...checkpoint.items,
-    ...projection.items.map(({ item }) => item),
+    ...projection.items
+      .filter(({ trailing }) => !trailing)
+      .map(({ item }) => item),
+    ...checkpoint.trailingItems,
+    ...trailing.map(({ item }) => item),
   ];
-  let next = nextCheckpoint(
-    projection,
-    checkpoint,
-    args.orderingBoundarySequence,
-  );
+  let next = nextCheckpoint(projection, checkpoint);
   if (
     checkpoint !== empty &&
     Math.random() < (audits < auditBurst ? 1 : auditRate)
@@ -400,6 +442,7 @@ export function projectConversationOutlineIncrementally(args: {
       next === entry?.checkpoint
         ? entry.chars
         : JSON.stringify(next.items).length +
+          JSON.stringify(next.trailingItems).length +
           [...next.turnIds, ...next.requestIds, ...next.itemIds].reduce(
             (sum, id) => sum + id.length,
             0,
@@ -410,6 +453,7 @@ export function projectConversationOutlineIncrementally(args: {
         checkpoint: next,
         contextBoundarySeq: args.contextBoundarySeq,
         dataVersion,
+        externalUserBoundarySequence: args.externalUserBoundarySequence,
         generation,
         key: args.key,
         maxSeq: args.maxSeq,

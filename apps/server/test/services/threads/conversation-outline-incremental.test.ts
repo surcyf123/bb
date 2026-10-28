@@ -78,6 +78,11 @@ function request(
   };
 }
 
+function agentRequest(requestId: string): RowSpec {
+  const row = request(requestId);
+  return { ...row, data: { ...row.data, initiator: "agent" } };
+}
+
 function accepted(requestId: string, turnId: string): RowSpec {
   return {
     type: "turn/input/accepted",
@@ -295,6 +300,100 @@ describe("incremental conversation outlines", () => {
           load(testThread);
         });
         expect(count).toBeGreaterThan(0);
+        expect(count).toBeLessThan(20);
+        expectMatchesFull(testThread);
+      }
+    });
+  });
+
+  it("keeps checkpointing after an early user message lands inside another turn", () => {
+    withTestThread((testThread) => {
+      appendRows(testThread, [
+        started("early"),
+        request("creq_earryaaaaa"),
+        started("overlap"),
+        accepted("creq_earryaaaaa", "overlap"),
+        message("overlap", "Overlap answer"),
+        completed("overlap"),
+        message("early", "Early answer"),
+        completed("early"),
+      ]);
+      seed(testThread, 100);
+      expectMatchesFull(testThread);
+      for (const rows of [
+        [delta("live", " continuation")],
+        [message("live", "Final answer"), completed("live")],
+        [
+          started("slow"),
+          request("creq_taiiaaaaaa"),
+          started("fast"),
+          accepted("creq_taiiaaaaaa", "fast"),
+          message("fast", "Fast answer"),
+        ],
+        [completed("fast"), message("slow", "Slow answer"), completed("slow")],
+        [
+          started("seeded"),
+          agentRequest("creq_seedaaaaaa"),
+          message("seeded", "Seeded answer"),
+          completed("seeded"),
+        ],
+        [started("next"), delta("next", "Next")],
+        [delta("next", " update")],
+      ]) {
+        appendRows(testThread, rows);
+        const count = countSelectedEventRows(testThread, () => {
+          load(testThread);
+        });
+        expect(count).toBeLessThan(40);
+        expectMatchesFull(testThread);
+      }
+    });
+  });
+
+  it("keeps checkpointing past steers rejected by a later command failure", () => {
+    withTestThread((testThread) => {
+      seed(testThread, 20);
+      appendRows(testThread, [
+        message("live", "Live done"),
+        completed("live"),
+        started("busy"),
+        request("creq_rejectaaaa", "busy"),
+        request("creq_rejectbbbb", "busy"),
+        accepted("creq_rejectaaaa", "busy"),
+        {
+          type: "system/error",
+          turnId: "busy",
+          data: { code: "thread_command_failed", message: "Steer failed" },
+        },
+        message("busy", "Busy answer"),
+        completed("busy"),
+      ]);
+      expectMatchesFull(testThread);
+      appendRows(
+        testThread,
+        Array.from({ length: 60 }, (_, i) => [
+          started(`later-${i}`),
+          message(`later-${i}`, `Later ${i}`),
+          completed(`later-${i}`),
+        ]).flat(),
+      );
+      appendRows(testThread, [started("tail"), delta("tail", "Tail")]);
+      expectMatchesFull(testThread);
+      for (const rows of [
+        [delta("tail", " continuation")],
+        [message("tail", "Final answer"), completed("tail")],
+        [
+          request("creq_abcdefghij"),
+          started("next"),
+          accepted("creq_abcdefghij", "next"),
+          delta("next", "Next"),
+        ],
+        [delta("next", " update")],
+      ]) {
+        appendRows(testThread, rows);
+        const count = countSelectedEventRows(testThread, () => {
+          load(testThread);
+        });
         expect(count).toBeLessThan(20);
         expectMatchesFull(testThread);
       }
