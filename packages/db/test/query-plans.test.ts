@@ -37,6 +37,7 @@ import {
   listLatestOpenBackgroundTaskStateRowsForThread,
   listStoredConversationOutlineEventRows,
   listStoredEventRows,
+  listStoredDelegatingItemRowsByItemIds,
   listStoredEventRowsByParentToolCallIds,
   listStoredTurnCompletedKeys,
   listTodoSnapshotEventRowsForThread,
@@ -803,6 +804,36 @@ describe("slow query index plans", () => {
     ).toMatch(
       /SEARCH events USING INDEX events_parent_tool_call_thread_parent_sequence_idx/u,
     );
+
+    db.$client.close();
+  });
+
+  it("finds parent delegating items through the item index despite skewed statistics", () => {
+    const { db, thread } = setup();
+    db.$client.exec("ANALYZE");
+    db.$client.exec("DELETE FROM sqlite_stat1 WHERE tbl = 'events'");
+    db.$client.exec(`INSERT INTO sqlite_stat1 (tbl, idx, stat) VALUES
+      ('events', 'events_thread_type_sequence_idx', '357696 134 12 1'),
+      ('events', 'events_thread_type_item_kind_sequence_idx', '393120 134 12 9 1'),
+      ('events', 'events_thread_turn_type_item_sequence_idx', '645840 134 41 6 1 1'),
+      ('events', 'events_thread_item_type_sequence_idx', '1162037 18446 3 2 1')`);
+    db.$client.exec("ANALYZE sqlite_schema");
+
+    const [query] = captureStatements(db, () => {
+      expect(
+        listStoredDelegatingItemRowsByItemIds(db, {
+          itemIds: Array.from({ length: 8 }, (_, index) => `missing-parent-${index}`),
+          maxInlineOutputChars: null,
+          threadId: thread.id,
+        }),
+      ).toEqual([]);
+    });
+    if (!query) {
+      throw new Error("Expected the delegating item lookup SQL");
+    }
+    expect(
+      queryPlanDetails({ db, params: query.params, sql: query.sql }),
+    ).toMatch(/SEARCH events USING INDEX events_delegating_item_lookup_idx/u);
 
     db.$client.close();
   });
