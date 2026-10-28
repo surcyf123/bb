@@ -8,6 +8,7 @@ import {
   getDatabaseDataVersion,
   getFirstParentedTimelineBoundarySequence,
   getThreadEventRewriteGeneration,
+  getThreadEventStructuralGeneration,
   getTimelineGroupingContextChangesInRange,
   listTimelineOrderingContext,
   type DbConnection,
@@ -36,6 +37,7 @@ interface TimelineGroupingContextEntry {
   context: TimelineGroupingContext;
   dataVersion: number;
   generation: number;
+  structuralGeneration: number;
   maxSeq: number;
 }
 
@@ -116,14 +118,29 @@ export function getTimelineGroupingContext(
   }
   const key = JSON.stringify([args.threadId, args.sequenceStart]);
   const generation = getThreadEventRewriteGeneration(args.threadId);
+  const structuralGeneration = getThreadEventStructuralGeneration(args.threadId);
   const dataVersion = getDatabaseDataVersion(db);
-  const entries = (cache.get(key) ?? []).filter(
+  const candidates = (cache.get(key) ?? []).filter(
     (entry) =>
-      entry.generation === generation &&
+      entry.structuralGeneration === structuralGeneration &&
       (!requireUnchangedDataVersion || entry.dataVersion === dataVersion),
   );
+  const entries = candidates.filter((entry) => entry.generation === generation);
   cache.delete(key);
-  const reusable = findReusableEntry(db, args, entries);
+  const exactReusable = findReusableEntry(db, args, entries);
+  const prunedReusable =
+    exactReusable === undefined
+      ? findReusableEntry(
+          db,
+          args,
+          candidates.filter((entry) => entry.generation !== generation),
+        )
+      : undefined;
+  const reusable =
+    exactReusable ??
+    (prunedReusable === undefined
+      ? undefined
+      : { entry: prunedReusable.entry, parentedChanged: true });
   if (reusable !== undefined && !reusable.parentedChanged) {
     cache.set(key, [
       reusable.entry,
@@ -144,7 +161,14 @@ export function getTimelineGroupingContext(
     externalUserBoundarySequence: orderingContext.boundarySequence,
   };
   cache.set(key, [
-    { context, orderingContext, dataVersion, generation, maxSeq: args.maxSeq },
+    {
+      context,
+      orderingContext,
+      dataVersion,
+      generation,
+      structuralGeneration,
+      maxSeq: args.maxSeq,
+    },
     ...entries.slice(0, GROUPING_CONTEXT_ENTRIES_PER_KEY - 1),
   ]);
   if (cache.size > GROUPING_CONTEXT_KEY_LIMIT) {

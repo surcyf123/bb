@@ -533,6 +533,8 @@ describe("timeline grouping context cache", () => {
     let comparisons = 0;
     let readsAfterWrite = 0;
     let reusedAfterWrite = 0;
+    let readsAfterPrune = 0;
+    let reusedAfterPrune = 0;
     try {
       for (let seed = 1; seed <= SEEDS; seed += 1) {
         const random = createRandom(seed);
@@ -540,7 +542,7 @@ describe("timeline grouping context cache", () => {
           const reader = createConnection(testThread.db.$client.name);
           try {
             for (let step = 0; step < 40; step += 1) {
-              applyRandomStep(testThread, random, step);
+              const pruned = applyRandomStep(testThread, random, step);
               const latest = getLatestThreadSequence(testThread.db, {
                 threadId: testThread.thread.id,
               });
@@ -556,10 +558,18 @@ describe("timeline grouping context cache", () => {
                   );
                 });
                 comparisons += 1;
+                const rescanned = statements.some(
+                  (sql) =>
+                    sql.includes("events_thread_type_sequence_idx") &&
+                    sql.includes("$.target.expectedTurnId"),
+                );
                 if (probe === 0 && step > 0) {
                   readsAfterWrite += 1;
-                  if (!statements.some((sql) => sql.includes("$.target.expectedTurnId")))
-                    reusedAfterWrite += 1;
+                  if (!rescanned) reusedAfterWrite += 1;
+                }
+                if (probe === 0 && pruned > 0) {
+                  readsAfterPrune += 1;
+                  if (!rescanned) reusedAfterPrune += 1;
                 }
               }
             }
@@ -574,6 +584,8 @@ describe("timeline grouping context cache", () => {
     }
     expect(comparisons).toBeGreaterThan(SEEDS * 100);
     expect(reusedAfterWrite).toBeGreaterThan(readsAfterWrite / 8);
+    expect(readsAfterPrune).toBeGreaterThan(0);
+    expect(reusedAfterPrune).toBeGreaterThan(readsAfterPrune / 2);
   }, 60_000);
 });
 
