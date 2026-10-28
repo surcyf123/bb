@@ -1771,13 +1771,15 @@ function selectThreadConversationOutline(
         },
       });
       const items: ReturnType<ConversationOutlineSelection["project"]> = [];
-      for (const row of timeline.rows) {
+      const trailingStart = timeline.rows.length - timeline.pendingSteerRowCount;
+      for (const [index, row] of timeline.rows.entries()) {
         if (row.kind !== "conversation") {
           continue;
         }
         items.push({
           sourceSeqStart: row.sourceSeqStart,
           sourceSeqEnd: row.sourceSeqEnd,
+          trailing: index >= trailingStart,
           item: {
             id: row.id,
             role: row.role,
@@ -1925,7 +1927,8 @@ export function loadThreadConversationOutline(
         thread,
         options,
       );
-      const { orderingBoundarySequence } = getTimelineGroupingContext(db, {
+      const { externalUserBoundarySequence, orderingBoundarySequence } =
+        getTimelineGroupingContext(db, {
         maxSeq: options.maxSeq,
         sequenceStart: historySequenceStart,
         threadId: thread.id,
@@ -1937,7 +1940,7 @@ export function loadThreadConversationOutline(
           key: buildThreadConversationOutlineCheckpointKey(thread, options),
           maxSeq: options.maxSeq,
           historySequenceStart,
-          orderingBoundarySequence,
+          externalUserBoundarySequence,
           resolveProjectionState: (classificationSequenceStart, previous) => {
             const state = getStoredConversationOutlineProjectionState(db, {
               threadId: thread.id,

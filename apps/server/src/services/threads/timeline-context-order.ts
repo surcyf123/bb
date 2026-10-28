@@ -15,6 +15,7 @@ import {
 
 interface TimelineGroupingContext {
   orderingBoundarySequence: number | null;
+  externalUserBoundarySequence: number | null;
   acceptedTurnIds: ReadonlyMap<string, string>;
 }
 
@@ -131,6 +132,7 @@ export function getTimelineGroupingContext(
       parentedBoundary <= orderingContext.boundaryScanThroughSequence
         ? parentedBoundary
         : (orderingContext.boundarySequence ?? parentedBoundary),
+    externalUserBoundarySequence: orderingContext.boundarySequence,
   };
   cache.set(key, [
     { context, orderingContext, dataVersion, generation, maxSeq: args.maxSeq },

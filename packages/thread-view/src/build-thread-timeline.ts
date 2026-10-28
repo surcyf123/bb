@@ -99,6 +99,7 @@ export interface ThreadTimelineFromEventsResult {
   contextWindowUsage: ThreadContextWindowUsage | null;
   goal: ThreadTimelineGoal | null;
   modelFallback: ThreadTimelineModelFallback | null;
+  pendingSteerRowCount: number;
   pendingTodos: ThreadTimelinePendingTodos | null;
   rows: TimelineRow[];
 }
@@ -1160,6 +1161,13 @@ export function buildThreadTimelineFromEvents(
   } satisfies Parameters<typeof buildEventProjection>[1];
   const projection = buildEventProjection(args.events, projectionOptions);
 
+  const pendingSteerRows = buildPendingSteerMessagesFromEvents(
+    args.acceptedClientRequestContext,
+    args.events,
+    args.options,
+  )
+    .filter((message) => !isSuppressedSystemMessage(message))
+    .map((message) => convertSteerMessage(message, ROOT_TIMELINE_ROW_ID_PREFIX));
   const rows = [
     ...buildTimelineRows(projection, {
       completedTurnDisplay: args.options.completedTurnDisplay,
@@ -1167,15 +1175,7 @@ export function buildThreadTimelineFromEvents(
       rowIdPrefix: ROOT_TIMELINE_ROW_ID_PREFIX,
       workspaceRoot: args.options.workspaceRoot,
     }),
-    ...buildPendingSteerMessagesFromEvents(
-      args.acceptedClientRequestContext,
-      args.events,
-      args.options,
-    )
-      .filter((message) => !isSuppressedSystemMessage(message))
-      .map((message) =>
-        convertSteerMessage(message, ROOT_TIMELINE_ROW_ID_PREFIX),
-      ),
+    ...pendingSteerRows,
   ];
 
   return {
@@ -1213,6 +1213,7 @@ export function buildThreadTimelineFromEvents(
           args.options.threadStatus,
           stateEvents,
         ),
+    pendingSteerRowCount: pendingSteerRows.length,
     rows,
   };
 }
