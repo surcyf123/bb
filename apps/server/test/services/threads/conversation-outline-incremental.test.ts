@@ -4,6 +4,7 @@ import {
   type CompletedTurnDisplay,
 } from "@bb/domain";
 import {
+  advanceThreadPruning,
   deleteThreadEventSuffixInTransaction,
   createThread,
   noopNotifier,
@@ -14,7 +15,10 @@ import {
   buildThreadConversationOutline,
   loadThreadConversationOutline,
 } from "../../../src/services/threads/timeline.js";
-import { configureConversationOutlineCache } from "../../../src/services/threads/conversation-outline-cache.js";
+import {
+  configureConversationOutlineCache,
+  runDeferredConversationOutlineAudits,
+} from "../../../src/services/threads/conversation-outline-cache.js";
 import {
   appendRows,
   withTestThread,
@@ -586,6 +590,75 @@ describe("incremental conversation outlines", () => {
     });
   });
 
+  it("keeps checkpointing after a turn is abandoned without completing", () => {
+    withTestThread((testThread) => {
+      seed(testThread, 5);
+      appendRows(testThread, [
+        message("live", "Live done"),
+        completed("live"),
+        started("abandoned"),
+        delta("abandoned", "Half"),
+      ]);
+      appendRows(
+        testThread,
+        Array.from({ length: 80 }, (_, i) => [
+          started(`after-${i}`),
+          message(`after-${i}`, `After ${i}`),
+          completed(`after-${i}`),
+        ]).flat(),
+      );
+      appendRows(testThread, [started("tail"), delta("tail", "Tail")]);
+      expectMatchesFull(testThread);
+      for (const rows of [
+        [delta("tail", " more")],
+        [message("tail", "Tail done"), completed("tail")],
+        [started("next"), delta("next", "Next")],
+        [delta("next", " update")],
+      ]) {
+        appendRows(testThread, rows);
+        const count = countSelectedEventRows(testThread, () => {
+          load(testThread);
+        });
+        expect(count).toBeLessThan(20);
+        expectMatchesFull(testThread);
+      }
+      appendRows(testThread, [delta("abandoned", " resumed")]);
+      expectMatchesFull(testThread);
+    });
+  });
+
+  it("keeps its checkpoint when pruning removes resolved deltas", () => {
+    withTestThread((testThread) => {
+      appendRows(
+        testThread,
+        Array.from({ length: 60 }, (_, i) => [
+          started(`pruned-${i}`),
+          delta(`pruned-${i}`, "Partial "),
+          delta(`pruned-${i}`, "answer"),
+          message(`pruned-${i}`, `Answer ${i}`),
+          completed(`pruned-${i}`),
+        ]).flat(),
+      );
+      appendRows(testThread, [started("tail"), delta("tail", "Tail")]);
+      expectMatchesFull(testThread);
+      appendRows(testThread, [delta("tail", " more")]);
+      expectMatchesFull(testThread);
+      let removed = 0;
+      for (let step = 0; step < 20; step += 1) {
+        removed += advanceThreadPruning(testThread.db, {
+          threadId: testThread.thread.id,
+        }).removed;
+      }
+      expect(removed).toBeGreaterThan(0);
+      appendRows(testThread, [delta("tail", " again")]);
+      const count = countSelectedEventRows(testThread, () => {
+        load(testThread);
+      });
+      expect(count).toBeLessThan(20);
+      expectMatchesFull(testThread);
+    });
+  });
+
   it("only reads the live tail after a long completed history, including across turn boundaries", () => {
     withTestThread((testThread) => {
       seed(testThread, 100);
@@ -829,6 +902,54 @@ describe("incremental conversation outlines", () => {
         });
       }
     }
+
+    it("drops a checkpoint when a deferred audit finds a mismatch", () => {
+      const mismatches: unknown[] = [];
+      configureConversationOutlineCache({
+        maxEntries: 32,
+        maxChars: 512_000_000,
+        requireUnchangedDataVersion: false,
+        auditRate: 1,
+        auditBurst: 0,
+        auditReporter: {
+          mismatch: (details) => mismatches.push(details),
+          summary: () => {},
+        },
+        deferAudits: true,
+      });
+      try {
+        withTestThread((testThread) => {
+          seed(testThread, 10);
+          load(testThread);
+          expect(runDeferredConversationOutlineAudits()).toEqual([]);
+          appendRows(testThread, [delta("live", " more")]);
+          load(testThread);
+          expect(runDeferredConversationOutlineAudits()).toEqual([]);
+          testThread.db.$client
+            .prepare(
+              "UPDATE events SET data = json_set(data, '$.item.text', 'Rewritten') WHERE thread_id = ? AND item_id = 'message-turn-0' AND type = 'item/completed'",
+            )
+            .run(testThread.thread.id);
+          appendRows(testThread, [delta("live", " again")]);
+          load(testThread);
+          expect(mismatches).toEqual([]);
+          expect(runDeferredConversationOutlineAudits()).toEqual([
+            testThread.thread.id,
+          ]);
+          expect(mismatches).toHaveLength(1);
+          expectMatchesFull(testThread);
+        });
+      } finally {
+        configureConversationOutlineCache({
+          maxEntries: 16,
+          maxChars: 8_000_000,
+          requireUnchangedDataVersion: true,
+          auditRate: 0,
+          auditBurst: 0,
+          auditReporter: null,
+        });
+      }
+    });
 
     function backgroundWork(turnId: string, id: string, complete: boolean): RowSpec {
       return {

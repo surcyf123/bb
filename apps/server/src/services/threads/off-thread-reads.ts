@@ -45,12 +45,14 @@ export type OffThreadReadRequest =
       kind: "outline";
       threadId: string;
       rewriteGeneration: number;
+      structuralGeneration: number;
       outlineOptions: OffThreadOutlineOptions;
     }
   | {
       kind: "timeline";
       threadId: string;
       rewriteGeneration: number;
+      structuralGeneration: number;
       thread: Thread;
       options: OffThreadTimelineOptions;
     };
