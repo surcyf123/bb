@@ -9,7 +9,7 @@ import type { ServerLogger } from "../../types.js";
 import type { ThreadTimelineBuildProfile } from "./timeline.js";
 import type { ThreadTimelinePageRequest } from "./timeline-pagination.js";
 
-const READ_TIMEOUT_MS = 30_000;
+const READ_TIMEOUT_MS = 120_000;
 const FAILURES_BEFORE_PAUSE = 3;
 const PAUSE_AFTER_FAILURES_MS = 5 * 60_000;
 

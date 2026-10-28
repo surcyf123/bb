@@ -14,6 +14,7 @@ import {
   buildThreadConversationOutline,
   loadThreadConversationOutline,
 } from "../../../src/services/threads/timeline.js";
+import { configureConversationOutlineCache } from "../../../src/services/threads/conversation-outline-cache.js";
 import {
   appendRows,
   withTestThread,
@@ -697,5 +698,137 @@ describe("incremental conversation outlines", () => {
         expectMatchesFull(testThread);
       }
     });
+  });
+  describe("in the off-thread read worker configuration", () => {
+    function withWorkerConfiguration(
+      run: () => void,
+      auditRate: number = 1,
+    ): void {
+      configureConversationOutlineCache({
+        maxEntries: 32,
+        maxChars: 512_000_000,
+        requireUnchangedDataVersion: false,
+        auditRate,
+        auditBurst: 0,
+        auditReporter: {
+          mismatch: (details) => {
+            throw new Error(`outline audit mismatch ${JSON.stringify(details)}`);
+          },
+          summary: () => {},
+        },
+      });
+      try {
+        run();
+      } finally {
+        configureConversationOutlineCache({
+          maxEntries: 16,
+          maxChars: 8_000_000,
+          requireUnchangedDataVersion: true,
+          auditRate: 0,
+          auditBurst: 0,
+          auditReporter: null,
+        });
+      }
+    }
+
+    function backgroundWork(turnId: string, id: string, complete: boolean): RowSpec {
+      return {
+        type: complete ? "item/completed" : "item/started",
+        turnId,
+        itemId: id,
+        itemKind: "backgroundTask",
+        data: {
+          item: {
+            id,
+            type: "backgroundTask",
+            taskType: "local_bash",
+            description: "Fixture work",
+            status: complete ? "completed" : "pending",
+            taskStatus: complete ? "completed" : "running",
+            skipTranscript: false,
+          },
+        },
+      };
+    }
+
+    function history(testThread: TestThread, turns: number): void {
+      appendRows(
+        testThread,
+        Array.from({ length: turns }, (_, index) => [
+          started(`old-${index}`),
+          backgroundWork(`old-${index}`, `old-work-${index}`, false),
+          message(`old-${index}`, `Old answer ${index}`),
+          completed(`old-${index}`),
+        ]).flat(),
+      );
+    }
+
+    it("keeps reusing its checkpoint while other connections write", () =>
+      withWorkerConfiguration(() =>
+        withTestThread((testThread) => {
+          history(testThread, 80);
+          appendRows(testThread, [started("live"), delta("live", "Live")]);
+          expectMatchesFull(testThread);
+          testThread.coldDb.$client
+            .prepare("UPDATE threads SET updated_at = updated_at WHERE id = ?")
+            .run(testThread.thread.id);
+          appendRows(testThread, [
+            backgroundWork("live", "live-work", false),
+            delta("live", " more"),
+          ]);
+          const rows = countSelectedEventRows(testThread, () =>
+            expectMatchesFull(testThread),
+          );
+          expect(rows).toBeLessThan(20);
+        }),
+      0,
+      ));
+
+    it("rebuilds when a frozen event is deleted without a rewrite", () =>
+      withWorkerConfiguration(() =>
+        withTestThread((testThread) => {
+          history(testThread, 20);
+          appendRows(testThread, [started("live"), delta("live", "Live")]);
+          expectMatchesFull(testThread);
+          testThread.coldDb.$client
+            .prepare(
+              "DELETE FROM events WHERE thread_id = ? AND item_id = 'message-old-3'",
+            )
+            .run(testThread.thread.id);
+          const rows = countSelectedEventRows(testThread, () =>
+            expectMatchesFull(testThread),
+          );
+          expect(rows).toBeGreaterThan(40);
+        }),
+      ));
+
+    it("rebuilds when late work updates a frozen background task", () =>
+      withWorkerConfiguration(() =>
+        withTestThread((testThread) => {
+          history(testThread, 20);
+          appendRows(testThread, [started("live"), delta("live", "Live")]);
+          expectMatchesFull(testThread);
+          appendRows(testThread, [backgroundWork("live", "old-work-2", true)]);
+          expectMatchesFull(testThread);
+        }),
+      ));
+
+    it("keeps its checkpoint across thread status changes", () =>
+      withWorkerConfiguration(() =>
+        withTestThread((testThread) => {
+          history(testThread, 40);
+          appendRows(testThread, [started("live"), delta("live", "Live")]);
+          expectMatchesFull(testThread);
+          for (const status of ["idle", "active", "idle"] as const) {
+            testThread.thread = { ...testThread.thread, status };
+            appendRows(testThread, [delta("live", ` ${status}`)]);
+            const rows = countSelectedEventRows(testThread, () =>
+              expectMatchesFull(testThread),
+            );
+            expect(rows).toBeLessThan(20);
+          }
+        }),
+      0,
+      ));
   });
 });

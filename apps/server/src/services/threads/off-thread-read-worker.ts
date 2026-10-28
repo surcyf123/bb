@@ -11,6 +11,7 @@ import {
 } from "@bb/db";
 import type { OffThreadTimelineOptions } from "./off-thread-reads.js";
 import { setStoredEventDecodeCacheLimits } from "./stored-event-decode-cache.js";
+import { configureConversationOutlineCache } from "./conversation-outline-cache.js";
 import {
   buildThreadTimelineWithProfile,
   loadThreadConversationOutline,
@@ -28,6 +29,10 @@ const OUTLINE_PREWARM_WINDOW_MS = 120_000;
 const OUTLINE_PREWARM_MAX_THREADS = 8;
 const WORKER_DECODE_CACHE_MAX_ENTRIES = 600_000;
 const WORKER_DECODE_CACHE_MAX_DATA_CHARS = 400_000_000;
+const WORKER_OUTLINE_CHECKPOINT_MAX_ENTRIES = 32;
+const WORKER_OUTLINE_CHECKPOINT_MAX_CHARS = 512_000_000;
+const WORKER_OUTLINE_AUDIT_RATE = 0.05;
+const WORKER_OUTLINE_AUDIT_BURST = 300;
 
 const baseRequestSchema = z.object({
   id: z.number().int(),
@@ -72,6 +77,19 @@ if (port === null) throw new Error("Off-thread read worker requires a parent");
 setStoredEventDecodeCacheLimits({
   maxEntries: WORKER_DECODE_CACHE_MAX_ENTRIES,
   maxDataChars: WORKER_DECODE_CACHE_MAX_DATA_CHARS,
+});
+configureConversationOutlineCache({
+  maxEntries: WORKER_OUTLINE_CHECKPOINT_MAX_ENTRIES,
+  maxChars: WORKER_OUTLINE_CHECKPOINT_MAX_CHARS,
+  requireUnchangedDataVersion: false,
+  auditRate: WORKER_OUTLINE_AUDIT_RATE,
+  auditBurst: WORKER_OUTLINE_AUDIT_BURST,
+  auditReporter: {
+    mismatch: (details) =>
+      console.warn(`[bb-outline-audit] mismatch ${JSON.stringify(details)}`),
+    summary: (details) =>
+      console.info(`[bb-outline-audit] summary ${JSON.stringify(details)}`),
+  },
 });
 const db = createConnection(databasePath);
 db.$client.pragma("query_only = ON");

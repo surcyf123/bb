@@ -1878,6 +1878,19 @@ export function getThreadMessage(
   };
 }
 
+function buildThreadConversationOutlineCheckpointKey(
+  thread: Thread,
+  options: BuildThreadConversationOutlineOptions,
+): string {
+  return JSON.stringify([
+    CONVERSATION_OUTLINE_PROJECTION_VERSION,
+    thread.providerId,
+    options.providerDisplayName ?? null,
+    options.completedTurnDisplay,
+    options.includeClearedContextHistory,
+  ]);
+}
+
 export function buildThreadConversationOutlineProjectionKey(
   thread: Thread,
   outlineSequence: number,
@@ -1949,7 +1962,7 @@ export function loadThreadConversationOutline(
         items: projectConversationOutlineIncrementally({
           db,
           threadId: thread.id,
-          key: buildThreadConversationOutlineProjectionKey(thread, 0, options),
+          key: buildThreadConversationOutlineCheckpointKey(thread, options),
           maxSeq: options.maxSeq,
           historySequenceStart,
           orderingBoundarySequence,
