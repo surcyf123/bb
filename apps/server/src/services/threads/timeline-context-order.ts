@@ -7,6 +7,7 @@ import {
 import {
   getDatabaseDataVersion,
   getFirstParentedTimelineBoundarySequence,
+  getFirstParentedTimelineBoundarySequenceSince,
   getThreadEventRewriteGeneration,
   getThreadEventStructuralGeneration,
   getTimelineGroupingContextChangesInRange,
@@ -45,6 +46,8 @@ interface TimelineGroupingContextEntry {
   generation: number;
   structuralGeneration: number;
   maxSeq: number;
+  parentedBoundary: number | null;
+  parentedThroughSequence: number;
 }
 
 const GROUPING_CONTEXT_KEY_LIMIT = 128;
@@ -176,7 +179,17 @@ export function getTimelineGroupingContext(
       : reusable.orderingChanged
         ? extendTimelineOrderingContext(db, args, reusable.entry.orderingContext)
         : reusable.entry.orderingContext;
-  const parentedBoundary = getFirstParentedTimelineBoundarySequence(db, args);
+  const parentedBoundary =
+    exactReusable !== undefined &&
+    exactReusable.entry.parentedThroughSequence <= args.maxSeq
+      ? earliestSequence(
+          exactReusable.entry.parentedBoundary,
+          getFirstParentedTimelineBoundarySequenceSince(db, {
+            ...args,
+            afterSequence: exactReusable.entry.parentedThroughSequence,
+          }),
+        )
+      : getFirstParentedTimelineBoundarySequence(db, args);
   const context: TimelineGroupingContext = {
     acceptedTurnIds: orderingContext.acceptedTurnIds,
     orderingBoundarySequence:
@@ -194,6 +207,8 @@ export function getTimelineGroupingContext(
       generation,
       structuralGeneration,
       maxSeq: args.maxSeq,
+      parentedBoundary,
+      parentedThroughSequence: args.maxSeq,
     },
     ...entries.slice(0, GROUPING_CONTEXT_ENTRIES_PER_KEY - 1),
   ]);
@@ -201,6 +216,15 @@ export function getTimelineGroupingContext(
     cache.delete(cache.keys().next().value!);
   }
   return context;
+}
+
+function earliestSequence(
+  left: number | null,
+  right: number | null,
+): number | null {
+  if (left === null) return right;
+  if (right === null) return left;
+  return Math.min(left, right);
 }
 
 function extendTimelineOrderingContext(

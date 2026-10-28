@@ -4,6 +4,8 @@ import {
   advanceThreadPruning,
   createConnection,
   deleteThreadEventSuffixInTransaction,
+  getFirstParentedTimelineBoundarySequence,
+  getFirstParentedTimelineBoundarySequenceSince,
   getLatestCompletedThreadContextClearSequence,
   getLatestThreadSequence,
 } from "@bb/db";
@@ -420,6 +422,86 @@ describe("timeline grouping context cache", () => {
       expect(
         expectCachedEqualsCold(testThread, maxSeq).orderingBoundarySequence,
       ).toBe(testCase.after);
+    });
+  });
+
+  it("computes the parented boundary incrementally from any earlier cut", () => {
+    let comparisons = 0;
+    let nonNull = 0;
+    let lowered = 0;
+    for (let seed = 1; seed <= SEEDS; seed += 1) {
+      const random = createRandom(seed * 7919);
+      withTestThread((testThread) => {
+        const threadId = testThread.thread.id;
+        for (let step = 0; step < 30; step += 1) {
+          appendRows(
+            testThread,
+            Array.from({ length: randomInteger(random, 1, 5) }, () =>
+              random() < 0.15
+                ? turnStarted(pick(random, RANDOM_TURN_IDS))
+                : randomRow(random),
+            ),
+          );
+          const maxSeq = getLatestThreadSequence(testThread.db, { threadId });
+          for (let probe = 0; probe < 4; probe += 1) {
+            const afterSequence = randomInteger(random, 0, maxSeq);
+            const sequenceStart =
+              random() < 0.7 ? 0 : randomInteger(random, 0, afterSequence);
+            const full = getFirstParentedTimelineBoundarySequence(testThread.db, {
+              threadId,
+              sequenceStart,
+              maxSeq,
+            });
+            const before = getFirstParentedTimelineBoundarySequence(testThread.db, {
+              threadId,
+              sequenceStart,
+              maxSeq: afterSequence,
+            });
+            const since = getFirstParentedTimelineBoundarySequenceSince(
+              testThread.db,
+              { threadId, sequenceStart, maxSeq, afterSequence },
+            );
+            const incremental =
+              before === null
+                ? since
+                : since === null
+                  ? before
+                  : Math.min(before, since);
+            expect(incremental, JSON.stringify({ seed, step, sequenceStart, afterSequence, maxSeq })).toBe(full);
+            comparisons += 1;
+            if (full !== null) nonNull += 1;
+            if (full !== null && full !== before) lowered += 1;
+          }
+        }
+      });
+    }
+    expect(comparisons).toBe(SEEDS * 30 * 4);
+    expect(nonNull).toBeGreaterThan(comparisons / 10);
+    expect(lowered).toBeGreaterThan(SEEDS);
+  }, 60_000);
+
+  it("updates the parented boundary from new subagent events without the full query", () => {
+    withTestThread((testThread) => {
+      appendRows(testThread, [
+        turnStarted("turn-1"),
+        userRequest("request-1"),
+        accepted("request-1", "turn-1"),
+        rootToolCall("call-1", "turn-1", "item/started"),
+        child("call-1", 1),
+      ]);
+      const warmSeq = appendRows(testThread, [child("call-1", 2)]);
+      expectCachedEqualsCold(testThread, warmSeq);
+      const maxSeq = appendRows(testThread, [
+        userRequest("request-2"),
+        child("call-1", 3),
+      ]);
+      const statements = captureStatementSql(testThread.db, () => {
+        expect(
+          expectCachedEqualsCold(testThread, maxSeq).orderingBoundarySequence,
+        ).toBe(warmSeq + 1);
+      });
+      expect(statements.some((sql) => sql.includes("nested_history"))).toBe(false);
+      expect(statements.some((sql) => sql.includes("changed AS MATERIALIZED"))).toBe(true);
     });
   });
 
