@@ -1769,11 +1769,6 @@ export function loadThreadConversationOutline(
           atOrBeforeSequence: options.maxSeq,
           threadId: thread.id,
         }) ?? 0;
-      const { externalUserBoundarySequence } = getTimelineGroupingContext(db, {
-        maxSeq: options.maxSeq,
-        sequenceStart: contextBoundarySeq,
-        threadId: thread.id,
-      });
       return {
         items: projectConversationOutlineIncrementally({
           db,
@@ -1781,7 +1776,12 @@ export function loadThreadConversationOutline(
           key: buildThreadConversationOutlineCheckpointKey(thread, options),
           maxSeq: options.maxSeq,
           contextBoundarySeq,
-          externalUserBoundarySequence,
+          resolveExternalUserBoundarySequence: () =>
+            getTimelineGroupingContext(db, {
+              maxSeq: options.maxSeq,
+              sequenceStart: contextBoundarySeq,
+              threadId: thread.id,
+            }).externalUserBoundarySequence,
           select: (sequenceStart, precedingAgentMessageDeltaCount) =>
             selectThreadConversationOutline(
               db,

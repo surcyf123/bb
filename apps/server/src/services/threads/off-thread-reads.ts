@@ -37,6 +37,7 @@ export type OffThreadReadRequest =
       kind: "outline";
       threadId: string;
       rewriteGeneration: number;
+      structuralGeneration: number;
       completedTurnDisplay: CompletedTurnDisplay;
       providerDisplayName?: string;
     }
@@ -44,6 +45,7 @@ export type OffThreadReadRequest =
       kind: "timeline";
       threadId: string;
       rewriteGeneration: number;
+      structuralGeneration: number;
       thread: Thread;
       options: OffThreadTimelineOptions;
     };

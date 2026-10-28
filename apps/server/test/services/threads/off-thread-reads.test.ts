@@ -11,6 +11,7 @@ import {
   getLatestThreadSequence,
   getThread,
   getThreadEventRewriteGeneration,
+  getThreadEventStructuralGeneration,
   insertEvents,
   migrate,
   noopNotifier,
@@ -81,6 +82,7 @@ async function fixture(status?: "idle") {
     readConversationOutlineOffThread(target, {
       threadId: thread.id,
       rewriteGeneration: getThreadEventRewriteGeneration(thread.id),
+      structuralGeneration: getThreadEventStructuralGeneration(thread.id),
       completedTurnDisplay: "collapse",
     });
   const loadInProcess = () => {
@@ -182,6 +184,7 @@ describe("off-thread conversation outline reads", { timeout: 60_000 }, () => {
         readConversationOutlineOffThread(broken, {
           threadId: thread.id,
           rewriteGeneration: 0,
+          structuralGeneration: 0,
           completedTurnDisplay: "collapse",
         });
       for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -221,6 +224,7 @@ describe("off-thread timeline builds", { timeout: 60_000 }, () => {
         {
           threadId: thread.id,
           rewriteGeneration: getThreadEventRewriteGeneration(thread.id),
+          structuralGeneration: getThreadEventStructuralGeneration(thread.id),
           thread: current,
           options,
         },

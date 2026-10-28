@@ -8,6 +8,7 @@ import {
   getAppSettings,
   getDatabaseDataVersion,
   getThreadEventRewriteGeneration,
+  getThreadEventStructuralGeneration,
   getThreadPluginMetadata,
   patchThreadPluginMetadata,
   getLatestCompletedThreadContextClearSequence,
@@ -317,6 +318,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
         {
           threadId: thread.id,
           rewriteGeneration: getThreadEventRewriteGeneration(thread.id),
+          structuralGeneration: getThreadEventStructuralGeneration(thread.id),
           thread,
           options: {
             completedTurnDisplay,
@@ -401,6 +403,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
       const body = await readConversationOutlineOffThread(offThreadTarget, {
         threadId: thread.id,
         rewriteGeneration: getThreadEventRewriteGeneration(thread.id),
+        structuralGeneration: getThreadEventStructuralGeneration(thread.id),
         completedTurnDisplay: resolveThreadCompletedTurnDisplay(
           deps,
           getAppSettings(deps.db),
