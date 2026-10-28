@@ -1927,12 +1927,16 @@ export function loadThreadConversationOutline(
         thread,
         options,
       );
-      const { externalUserBoundarySequence, orderingBoundarySequence } =
-        getTimelineGroupingContext(db, {
-        maxSeq: options.maxSeq,
-        sequenceStart: historySequenceStart,
-        threadId: thread.id,
-      });
+      let groupingContext: ReturnType<typeof getTimelineGroupingContext> | null =
+        null;
+      const resolveGroupingContext = () => {
+        groupingContext ??= getTimelineGroupingContext(db, {
+          maxSeq: options.maxSeq,
+          sequenceStart: historySequenceStart,
+          threadId: thread.id,
+        });
+        return groupingContext;
+      };
       return {
         items: projectConversationOutlineIncrementally({
           db,
@@ -1940,7 +1944,8 @@ export function loadThreadConversationOutline(
           key: buildThreadConversationOutlineCheckpointKey(thread, options),
           maxSeq: options.maxSeq,
           historySequenceStart,
-          externalUserBoundarySequence,
+          resolveExternalUserBoundarySequence: () =>
+            resolveGroupingContext().externalUserBoundarySequence,
           resolveProjectionState: (classificationSequenceStart, previous) => {
             const state = getStoredConversationOutlineProjectionState(db, {
               threadId: thread.id,
@@ -1951,9 +1956,9 @@ export function loadThreadConversationOutline(
             });
             return {
               includeNestedEvents:
-                orderingBoundarySequence !== null ||
                 previous?.includeNestedEvents === true ||
-                state.includeNestedEvents,
+                state.includeNestedEvents ||
+                resolveGroupingContext().orderingBoundarySequence !== null,
               summaryCompactionEnabled: state.summaryCompactionEnabled,
             };
           },

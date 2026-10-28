@@ -13,6 +13,7 @@ import {
   listContextWindowUsageRows,
   getLatestThreadSequence,
   getThreadEventRewriteGeneration,
+  getThreadEventStructuralGeneration,
   getLatestStoredConversationOutlineSequence,
   listQueuedThreadMessages,
 } from "@bb/db";
@@ -340,6 +341,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
         {
           threadId: thread.id,
           rewriteGeneration: getThreadEventRewriteGeneration(thread.id),
+          structuralGeneration: getThreadEventStructuralGeneration(thread.id),
           thread,
           options: {
             completedTurnDisplay,
@@ -426,6 +428,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
       const body = await readConversationOutlineOffThread(offThreadTarget, {
         threadId: thread.id,
         rewriteGeneration: getThreadEventRewriteGeneration(thread.id),
+        structuralGeneration: getThreadEventStructuralGeneration(thread.id),
         outlineOptions,
       });
       if (body !== null) {

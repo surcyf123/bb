@@ -363,6 +363,7 @@ export {
 export {
   getDatabaseDataVersion,
   getThreadEventRewriteGeneration,
+  getThreadEventStructuralGeneration,
   syncThreadEventRewriteGeneration,
 } from "./event-rewrite-generation.js";
 export {

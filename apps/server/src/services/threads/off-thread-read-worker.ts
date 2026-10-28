@@ -11,7 +11,10 @@ import {
 } from "@bb/db";
 import type { OffThreadTimelineOptions } from "./off-thread-reads.js";
 import { setStoredEventDecodeCacheLimits } from "./stored-event-decode-cache.js";
-import { configureConversationOutlineCache } from "./conversation-outline-cache.js";
+import {
+  configureConversationOutlineCache,
+  runDeferredConversationOutlineAudits,
+} from "./conversation-outline-cache.js";
 import {
   buildThreadTimelineWithProfile,
   loadThreadConversationOutline,
@@ -31,13 +34,14 @@ const WORKER_DECODE_CACHE_MAX_ENTRIES = 600_000;
 const WORKER_DECODE_CACHE_MAX_DATA_CHARS = 400_000_000;
 const WORKER_OUTLINE_CHECKPOINT_MAX_ENTRIES = 32;
 const WORKER_OUTLINE_CHECKPOINT_MAX_CHARS = 512_000_000;
-const WORKER_OUTLINE_AUDIT_RATE = 0.05;
-const WORKER_OUTLINE_AUDIT_BURST = 300;
+const WORKER_OUTLINE_AUDIT_RATE = 0.02;
+const WORKER_OUTLINE_AUDIT_BURST = 20;
 
 const baseRequestSchema = z.object({
   id: z.number().int(),
   threadId: z.string(),
   rewriteGeneration: z.number().int().nonnegative(),
+  structuralGeneration: z.number().int().nonnegative(),
 });
 const requestSchema = z.discriminatedUnion("kind", [
   baseRequestSchema.extend({
@@ -90,22 +94,48 @@ configureConversationOutlineCache({
     summary: (details) =>
       console.info(`[bb-outline-audit] summary ${JSON.stringify(details)}`),
   },
+  deferAudits: true,
 });
 const db = createConnection(databasePath);
 db.$client.pragma("query_only = ON");
 const outlineItemsCache = new Map<string, string>();
 const seenGenerations = new Map<string, number>();
 
-function syncGeneration(threadId: string, generation: number): void {
+function syncGeneration(
+  threadId: string,
+  generation: number,
+  structuralGeneration: number,
+): void {
   const previous = seenGenerations.get(threadId);
   if (previous !== undefined && previous !== generation) {
     clearTimelineOrderingContextCache(db);
   }
   seenGenerations.set(threadId, generation);
-  syncThreadEventRewriteGeneration(threadId, generation);
+  syncThreadEventRewriteGeneration(threadId, generation, structuralGeneration);
 }
 
-function readOutline(request: OutlineRequest): string {
+function runDeferredAudits(): void {
+  let mismatched: string[] = [];
+  try {
+    mismatched = runDeferredConversationOutlineAudits();
+  } catch (error) {
+    console.warn(
+      `[bb-outline-audit] deferred audit failed ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  for (const threadId of mismatched) {
+    for (const key of [...outlineItemsCache.keys()]) {
+      const parsed: unknown = JSON.parse(key);
+      if (Array.isArray(parsed) && parsed[0] === threadId)
+        outlineItemsCache.delete(key);
+    }
+  }
+}
+
+function readOutline(
+  request: OutlineRequest,
+  reply?: (result: string) => void,
+): string {
   return db.$client.transaction(() => {
     const thread = getThread(db, request.threadId);
     if (thread === null || thread.deletedAt !== null) {
@@ -142,7 +172,10 @@ function readOutline(request: OutlineRequest): string {
       if (oldest === undefined) break;
       outlineItemsCache.delete(oldest);
     }
-    return `{"items":${itemsJson},"maxSeq":${JSON.stringify(maxSeq)}}`;
+    const result = `{"items":${itemsJson},"maxSeq":${JSON.stringify(maxSeq)}}`;
+    reply?.(result);
+    runDeferredAudits();
+    return result;
   })();
 }
 
@@ -211,13 +244,24 @@ port.on("message", (message: unknown) => {
     return;
   }
   const request = parsed.data;
+  let replied = false;
   try {
-    syncGeneration(request.threadId, request.rewriteGeneration);
-    if (request.kind === "outline") rememberOutlineRequest(request);
-    const result =
-      request.kind === "timeline" ? buildTimeline(request) : readOutline(request);
-    port.postMessage({ id: request.id, result });
+    syncGeneration(
+      request.threadId,
+      request.rewriteGeneration,
+      request.structuralGeneration,
+    );
+    if (request.kind === "timeline") {
+      port.postMessage({ id: request.id, result: buildTimeline(request) });
+      return;
+    }
+    rememberOutlineRequest(request);
+    readOutline(request, (result) => {
+      replied = true;
+      port.postMessage({ id: request.id, result });
+    });
   } catch (error) {
+    if (replied) return;
     port.postMessage({
       id: request.id,
       error: error instanceof Error ? error.message : String(error),

@@ -413,7 +413,7 @@ function advanceThreadPruningTransaction(
     { behavior: "immediate" },
   );
   if (result.removed > 0 && result.threadId !== null)
-    bumpThreadEventRewriteGeneration(result.threadId);
+    bumpThreadEventRewriteGeneration(result.threadId, "prune");
   return result;
 }
 
