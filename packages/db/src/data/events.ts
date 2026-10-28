@@ -3359,6 +3359,86 @@ export function getFirstParentedTimelineBoundarySequence(
   return result?.sequence ?? null;
 }
 
+export function getFirstParentedTimelineBoundarySequenceSince(
+  db: DbConnection,
+  args: {
+    threadId: string;
+    sequenceStart: number;
+    maxSeq: number;
+    afterSequence: number;
+  },
+): number | null {
+  const result = db.get<{ sequence: number | null }>(sql`
+    WITH changed AS MATERIALIZED (
+      SELECT parent_tool_call_id, item_id, item_kind, turn_id, type
+      FROM events INDEXED BY events_thread_sequence_idx
+      WHERE thread_id = ${args.threadId}
+        AND sequence > ${args.afterSequence} AND sequence <= ${args.maxSeq}
+    ), affected AS MATERIALIZED (
+      SELECT parent_tool_call_id AS item_id FROM changed
+      WHERE parent_tool_call_id IS NOT NULL
+      UNION
+      SELECT item_id FROM changed
+      WHERE parent_tool_call_id IS NULL
+        AND item_kind IN ('toolCall', 'delegation')
+        AND item_id IS NOT NULL
+      UNION
+      SELECT root_item.item_id
+      FROM changed
+      INNER JOIN events AS root_item INDEXED BY events_thread_turn_type_item_sequence_idx
+        ON root_item.thread_id = ${args.threadId}
+        AND root_item.turn_id = changed.turn_id
+      WHERE changed.type = 'turn/started'
+        AND changed.parent_tool_call_id IS NULL
+        AND root_item.item_kind IN ('toolCall', 'delegation')
+        AND root_item.parent_tool_call_id IS NULL
+        AND root_item.item_id IS NOT NULL
+    ), parents AS MATERIALIZED (
+      SELECT item_id, turn_id, min(sequence) AS start
+      FROM events INDEXED BY events_delegating_item_lookup_idx
+      WHERE thread_id = ${args.threadId}
+        AND item_id IN (SELECT item_id FROM affected)
+        AND item_kind IN ('toolCall', 'delegation')
+        AND parent_tool_call_id IS NULL
+        AND sequence >= ${args.sequenceStart} AND sequence <= ${args.maxSeq}
+        AND EXISTS (
+          SELECT 1 FROM events AS root_start INDEXED BY events_thread_turn_type_item_sequence_idx
+          WHERE root_start.thread_id = events.thread_id
+            AND root_start.turn_id = events.turn_id
+            AND root_start.type = 'turn/started'
+            AND root_start.parent_tool_call_id IS NULL
+            AND root_start.sequence <= ${args.maxSeq}
+        )
+      GROUP BY item_id, turn_id
+    ), spans AS MATERIALIZED (
+      SELECT start, (
+        SELECT max(child.sequence)
+        FROM events AS child INDEXED BY events_parent_tool_call_thread_parent_sequence_idx
+        WHERE child.thread_id = ${args.threadId}
+          AND child.parent_tool_call_id IS NOT NULL
+          AND child.parent_tool_call_id = parents.item_id
+          AND child.sequence <= ${args.maxSeq}
+      ) AS end FROM parents
+    )
+    SELECT min(${events.sequence}) AS sequence
+    FROM events INNER JOIN spans
+      ON ${events.sequence} > spans.start AND ${events.sequence} < spans.end
+    WHERE ${events.type} = 'client/turn/requested'
+      AND ${events.threadId} = ${args.threadId}
+      AND ${visibleTimelineRequestInputSql}
+      AND (
+        COALESCE(json_extract(${events.data}, '$.target.kind'), 'new-turn')
+          IN ('thread-start', 'new-turn')
+        OR (
+          json_extract(${events.data}, '$.target.kind') IN ('auto', 'steer')
+          AND json_extract(${events.data}, '$.target.expectedTurnId') IS NULL
+        )
+      )
+      AND json_extract(${events.data}, '$.initiator') = 'user'
+  `);
+  return result?.sequence ?? null;
+}
+
 export function listTimelineWindowHintsDescending(
   db: DbConnection,
   args: ListTimelineWindowHintsDescendingArgs,
