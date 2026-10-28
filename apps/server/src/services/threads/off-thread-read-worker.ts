@@ -108,10 +108,10 @@ function syncGeneration(
   structuralGeneration: number,
 ): void {
   const previous = seenGenerations.get(threadId);
-  if (previous !== undefined && previous !== generation) {
+  if (previous !== undefined && previous !== structuralGeneration) {
     clearTimelineOrderingContextCache(db);
   }
-  seenGenerations.set(threadId, generation);
+  seenGenerations.set(threadId, structuralGeneration);
   syncThreadEventRewriteGeneration(threadId, generation, structuralGeneration);
 }
 
