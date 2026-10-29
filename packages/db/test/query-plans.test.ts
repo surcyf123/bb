@@ -29,7 +29,7 @@ import {
   insertEvents,
   listActiveBackgroundTaskCountsByThreadIds,
   listItemEventSpansByItems,
-  listOpenTurnInputAcceptedRowsByThreadIds,
+  listOpenTurnInputAcceptedRowsByThreadIdsUncached,
   listOpenBackgroundTaskItemRowsForHost,
   listOpenBackgroundTaskItemRowsForThread,
   listStoredClientTurnRequestRowsByKeys,
@@ -402,7 +402,7 @@ describe("slow query index plans", () => {
     const { db, thread } = setup();
     try {
       const captured = captureStatements(db, () => {
-        listOpenTurnInputAcceptedRowsByThreadIds(db, {
+        listOpenTurnInputAcceptedRowsByThreadIdsUncached(db, {
           threadIds: [thread.id, "missing"],
         });
       });
