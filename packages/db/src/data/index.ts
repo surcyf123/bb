@@ -354,6 +354,7 @@ export {
   listLatestOpenBackgroundTaskStateRowsForThread,
   listTodoSnapshotEventRowsForThread,
   listOpenTurnInputAcceptedRowsByThreadIds,
+  listOpenTurnInputAcceptedRowsByThreadIdsUncached,
   listOpenBackgroundTaskItemRowsForHost,
   listOpenBackgroundTaskItemRowsForThread,
   listThreadIdsStoppedSinceLastTurnStart,
