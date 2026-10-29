@@ -9,9 +9,13 @@ import { noopNotifier } from "../../src/notifier.js";
 import {
   getStoredTurnRequestEventForTurn,
   getStoredTurnRequestEventForTurnUncached,
+  deleteThreadEventSuffixInTransaction,
+  getLatestThreadSequence,
   insertEvents,
   listActiveBackgroundTaskCountsByThreadIds,
   listActiveBackgroundTaskCountsByThreadIdsUncached,
+  listOpenTurnInputAcceptedRowsByThreadIds,
+  listOpenTurnInputAcceptedRowsByThreadIdsUncached,
 } from "../../src/data/events.js";
 import { bumpThreadEventRewriteGeneration } from "../../src/data/event-rewrite-generation.js";
 import { createProject } from "../../src/data/projects.js";
@@ -117,6 +121,141 @@ describe("active background-task count cache", () => {
     expect(
       countActiveQueries(db, () => listActiveBackgroundTaskCountsByThreadIds(db, { threadIds })),
     ).toBe(1);
+  });
+});
+
+describe("incremental thread-list reads", () => {
+  function createRandom(seed: number) {
+    let state = seed;
+    return () => {
+      state = (state * 1103515245 + 12345) % 2147483648;
+      return state / 2147483648;
+    };
+  }
+
+  function randomEvent(random: () => number, threadId: string, sequence: number) {
+    const turn = `turn-${1 + Math.floor(random() * 4)}`;
+    const choice = random();
+    const base = { threadId, sequence, itemKind: null, itemId: null, parentToolCallId: null };
+    if (choice < 0.25) {
+      return { ...base, scope: turnScope(turn), type: "turn/input/accepted" as const, data: JSON.stringify({ clientRequestId: encodeClientTurnRequestIdNumber({ value: sequence }) }) };
+    }
+    if (choice < 0.38) {
+      return { ...base, scope: turnScope(turn), type: "turn/completed" as const, data: JSON.stringify({ status: "completed" }) };
+    }
+    if (choice < 0.45) {
+      return { ...base, scope: threadScope(), type: "system/thread/interrupted" as const, data: "{}" };
+    }
+    if (choice < 0.7) {
+      return taskEvent({ threadId, sequence, type: random() < 0.6 ? "item/started" : "item/backgroundTask/completed", itemId: `task:${Math.floor(random() * 5)}` });
+    }
+    return { ...base, scope: turnScope(turn), type: "item/agentMessage/delta" as const, itemId: "message", itemKind: "agentMessage" as const, data: JSON.stringify({ delta: "x", itemId: "message" }) };
+  }
+
+  it("matches the uncached queries across appends, idle threads and rewrites", () => {
+    let openRowsSeen = 0;
+    let countRowsSeen = 0;
+    for (let seed = 1; seed <= 12; seed += 1) {
+      const random = createRandom(seed);
+      const { db, newThread } = setup();
+      const threads = [newThread(), newThread(), newThread(), newThread()];
+      const threadIds = threads.map((thread) => thread.id);
+      for (let step = 0; step < 60; step += 1) {
+        const thread = threads[Math.floor(random() * threads.length)]!;
+        const latest = getLatestThreadSequence(db, { threadId: thread.id });
+        if (step > 5 && random() < 0.06 && latest > 2) {
+          const cutoffSequence = latest - Math.floor(random() * 3);
+          db.transaction((tx) => {
+            deleteThreadEventSuffixInTransaction(tx, {
+              cutoffSequence,
+              oldMaxSequence: latest,
+              threadId: thread.id,
+            });
+          });
+        } else if (random() < 0.8) {
+          const count = 1 + Math.floor(random() * 3);
+          insertEvents(
+            db,
+            noopNotifier,
+            Array.from({ length: count }, (_, index) =>
+              randomEvent(random, thread.id, latest + index + 1),
+            ),
+          );
+        }
+        for (const ids of [threadIds, threadIds.slice(0, 2)]) {
+          const open = listOpenTurnInputAcceptedRowsByThreadIds(db, { threadIds: ids });
+          expect(open, `open seed=${seed} step=${step}`).toEqual(
+            listOpenTurnInputAcceptedRowsByThreadIdsUncached(db, { threadIds: ids }),
+          );
+          const counts = listActiveBackgroundTaskCountsByThreadIds(db, { threadIds: ids });
+          expect(counts, `counts seed=${seed} step=${step}`).toEqual(
+            listActiveBackgroundTaskCountsByThreadIdsUncached(db, { threadIds: ids }),
+          );
+          openRowsSeen += open.length;
+          countRowsSeen += counts.length;
+        }
+      }
+    }
+    expect(openRowsSeen).toBeGreaterThan(100);
+    expect(countRowsSeen).toBeGreaterThan(100);
+  });
+
+  it("skips background-task counting for threads without new events", () => {
+    const { db, newThread } = setup();
+    const idle = newThread();
+    const busy = newThread();
+    insertEvents(db, noopNotifier, [
+      taskEvent({ threadId: idle.id, sequence: 1, type: "item/started", itemId: "task:a" }),
+      taskEvent({ threadId: busy.id, sequence: 1, type: "item/started", itemId: "task:b" }),
+    ]);
+    const threadIds = [idle.id, busy.id];
+    listActiveBackgroundTaskCountsByThreadIds(db, { threadIds });
+    insertEvents(db, noopNotifier, [
+      taskEvent({ threadId: busy.id, sequence: 2, type: "item/backgroundTask/completed", itemId: "task:b" }),
+    ]);
+    const prepare = vi.spyOn(db.$client, "prepare");
+    try {
+      expect(listActiveBackgroundTaskCountsByThreadIds(db, { threadIds })).toEqual(
+        listActiveBackgroundTaskCountsByThreadIdsUncached(db, { threadIds }),
+      );
+      const watermark = prepare.mock.calls
+        .map(([source]) => String(source))
+        .find((source) => source.includes("COUNT(*) AS eventCount"));
+      expect(watermark).toBeDefined();
+      expect(prepare.mock.calls.filter(([source]) => String(source).includes("COUNT(*) AS eventCount"))).toHaveLength(1);
+    } finally {
+      prepare.mockRestore();
+    }
+  });
+
+  it("reads only new accepted inputs for an open turn", () => {
+    const { db, newThread } = setup();
+    const thread = newThread();
+    const accepted = (sequence: number, turn: string) => ({
+      threadId: thread.id,
+      sequence,
+      scope: turnScope(turn),
+      type: "turn/input/accepted" as const,
+      itemKind: null,
+      itemId: null,
+      parentToolCallId: null,
+      data: JSON.stringify({ clientRequestId: encodeClientTurnRequestIdNumber({ value: sequence }) }),
+    });
+    insertEvents(db, noopNotifier, [accepted(1, "turn-1"), accepted(2, "turn-2")]);
+    const threadIds = [thread.id];
+    expect(listOpenTurnInputAcceptedRowsByThreadIds(db, { threadIds })).toHaveLength(2);
+    insertEvents(db, noopNotifier, [accepted(3, "turn-3")]);
+    const prepare = vi.spyOn(db.$client, "prepare");
+    try {
+      expect(listOpenTurnInputAcceptedRowsByThreadIds(db, { threadIds })).toHaveLength(3);
+      const accepts = prepare.mock.calls.filter(([source]) =>
+        String(source).includes("completed_turn_for_accepted_input"),
+      );
+      expect(accepts).toHaveLength(1);
+      expect(String(accepts[0]![0])).toMatch(/"sequence" > \?/u);
+    } finally {
+      prepare.mockRestore();
+    }
   });
 });
 
