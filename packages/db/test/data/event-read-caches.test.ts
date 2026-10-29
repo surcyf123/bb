@@ -18,6 +18,7 @@ import {
   listOpenTurnInputAcceptedRowsByThreadIdsUncached,
 } from "../../src/data/events.js";
 import { bumpThreadEventRewriteGeneration } from "../../src/data/event-rewrite-generation.js";
+import { advanceThreadPruning } from "../../src/data/thread-pruning.js";
 import { createProject } from "../../src/data/projects.js";
 import { createThread } from "../../src/data/threads.js";
 import { upsertHost } from "../../src/data/hosts.js";
@@ -146,6 +147,9 @@ describe("incremental thread-list reads", () => {
     if (choice < 0.45) {
       return { ...base, scope: threadScope(), type: "system/thread/interrupted" as const, data: "{}" };
     }
+    if (choice < 0.55) {
+      return { ...base, scope: threadScope(), type: "provider/rateLimits/updated" as const, data: JSON.stringify({ rateLimits: {} }) };
+    }
     if (choice < 0.7) {
       return taskEvent({ threadId, sequence, type: random() < 0.6 ? "item/started" : "item/backgroundTask/completed", itemId: `task:${Math.floor(random() * 5)}` });
     }
@@ -155,6 +159,7 @@ describe("incremental thread-list reads", () => {
   it("matches the uncached queries across appends, idle threads and rewrites", () => {
     let openRowsSeen = 0;
     let countRowsSeen = 0;
+    let prunedRows = 0;
     for (let seed = 1; seed <= 12; seed += 1) {
       const random = createRandom(seed);
       const { db, newThread } = setup();
@@ -172,6 +177,8 @@ describe("incremental thread-list reads", () => {
               threadId: thread.id,
             });
           });
+        } else if (step > 5 && random() < 0.1) {
+          prunedRows += advanceThreadPruning(db, { threadId: thread.id }).removed;
         } else if (random() < 0.8) {
           const count = 1 + Math.floor(random() * 3);
           insertEvents(
@@ -197,6 +204,7 @@ describe("incremental thread-list reads", () => {
       }
     }
     expect(openRowsSeen).toBeGreaterThan(100);
+    expect(prunedRows).toBeGreaterThan(0);
     expect(countRowsSeen).toBeGreaterThan(100);
   });
 

@@ -67,6 +67,7 @@ import { truncatedEventDataColumn } from "./event-output-truncation.js";
 import {
   bumpThreadEventRewriteGeneration,
   getThreadEventRewriteGeneration,
+  getThreadEventStructuralGeneration,
 } from "./event-rewrite-generation.js";
 import { deriveStoredEventItemFieldsFromSource } from "../stored-event-item-fields.js";
 import {
@@ -1607,7 +1608,7 @@ export function listOpenTurnInputAcceptedRowsByThreadIds(
     const latestSequence = latestSequences.get(threadId) ?? -1;
     if (
       entry === undefined ||
-      entry.generation !== getThreadEventRewriteGeneration(threadId) ||
+      entry.generation !== getThreadEventStructuralGeneration(threadId) ||
       entry.throughSequence > latestSequence
     ) {
       uncachedThreadIds.push(threadId);
@@ -1649,7 +1650,7 @@ export function listOpenTurnInputAcceptedRowsByThreadIds(
       const threadRows = fresh.filter((row) => row.threadId === threadId);
       cache.delete(threadId);
       cache.set(threadId, {
-        generation: getThreadEventRewriteGeneration(threadId),
+        generation: getThreadEventStructuralGeneration(threadId),
         throughSequence: latestSequences.get(threadId) ?? -1,
         rows: threadRows,
       });
