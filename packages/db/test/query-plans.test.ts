@@ -22,6 +22,7 @@ import {
 import {
   appendDaemonEventsInTransaction,
   getFirstParentedTimelineBoundarySequence,
+  getFirstParentedTimelineBoundarySequenceSince,
   getTimelineGroupingContextChangesInRange,
   hasStoredSpawnAgentToolCall,
   listStoredEventRowsInSequenceRange,
@@ -780,6 +781,30 @@ describe("slow query index plans", () => {
     expect(queryPlanDetails({ db, ...query }).split("\n")).toEqual([
       "SEARCH events USING INDEX events_thread_sequence_idx (thread_id=? AND sequence>? AND sequence<?)",
     ]);
+
+    db.$client.close();
+  });
+
+  it("looks up late root turn starts by turn for the incremental parented boundary", () => {
+    const { db, thread } = setup();
+    const [query] = captureStatements(db, () => {
+      getFirstParentedTimelineBoundarySequenceSince(db, {
+        afterSequence: 10,
+        maxSeq: 20,
+        sequenceStart: 0,
+        threadId: thread.id,
+      });
+    });
+    if (!query) {
+      throw new Error("Expected the incremental parented-boundary SQL");
+    }
+    const plan = queryPlanDetails({ db, params: query.params, sql: query.sql });
+    expect(plan).toMatch(
+      /SEARCH root_item USING INDEX events_thread_turn_type_item_sequence_idx \(thread_id=\? AND turn_id=\?/u,
+    );
+    expect(plan).toMatch(
+      /SEARCH events USING INDEX events_thread_sequence_idx \(thread_id=\? AND sequence>\? AND sequence<\?\)/u,
+    );
 
     db.$client.close();
   });

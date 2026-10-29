@@ -3407,10 +3407,10 @@ export function getFirstParentedTimelineBoundarySequenceSince(
       UNION
       SELECT root_item.item_id
       FROM changed
-      INNER JOIN events AS root_item INDEXED BY events_thread_turn_type_item_sequence_idx
-        ON root_item.thread_id = ${args.threadId}
+      CROSS JOIN events AS root_item INDEXED BY events_thread_turn_type_item_sequence_idx
+      WHERE root_item.thread_id = ${args.threadId}
         AND root_item.turn_id = changed.turn_id
-      WHERE changed.type = 'turn/started'
+        AND changed.type = 'turn/started'
         AND changed.parent_tool_call_id IS NULL
         AND root_item.item_kind IN ('toolCall', 'delegation')
         AND root_item.parent_tool_call_id IS NULL
