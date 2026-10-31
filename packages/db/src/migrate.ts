@@ -1166,6 +1166,39 @@ function skipEventLargeValuesRoundTripForInlineEvents(
   markMigrationApplied(db, restoreMigration);
 }
 
+function applyMigrationsBehindLocalLedgerRows(
+  db: DbConnection,
+  migrationsFolder: string,
+): void {
+  if (!tableExists(db, "__drizzle_migrations")) {
+    return;
+  }
+  const expectedMigrations = readExpectedAppliedMigrations(migrationsFolder);
+  const expectedCreatedAts = new Set(
+    expectedMigrations.map((migration) => migration.createdAt),
+  );
+  const appliedCreatedAts = readAppliedMigrationCreatedAts(db);
+  const localCreatedAts = [...appliedCreatedAts].filter(
+    (createdAt) => !expectedCreatedAts.has(createdAt),
+  );
+  if (localCreatedAts.length === 0) {
+    return;
+  }
+  const newestLocalCreatedAt = Math.max(...localCreatedAts);
+  const reorderedTags = new Set<string>(reorderedCleanupMigrationTags);
+  for (const migration of expectedMigrations) {
+    if (
+      migration.createdAt >= newestLocalCreatedAt ||
+      appliedCreatedAts.has(migration.createdAt) ||
+      reorderedTags.has(migration.tag)
+    ) {
+      continue;
+    }
+    applyMigrationStatements(db, migration);
+    appliedCreatedAts.add(migration.createdAt);
+  }
+}
+
 function stageQueuedMessageGroups(
   db: DbConnection,
   migrationsFolder: string,
@@ -1454,6 +1487,7 @@ export function migrate(db: DbConnection, options: MigrateOptions = {}): void {
     const stagedThreadStorageDeletedAt =
       stageExistingThreadStorageDeletedAtColumn(db, migrationsFolder);
     try {
+      applyMigrationsBehindLocalLedgerRows(db, migrationsFolder);
       drizzleMigrate(db, { migrationsFolder });
     } finally {
       if (stagedConnectMachineId) restoreStagedConnectMachineIdColumn(db);
