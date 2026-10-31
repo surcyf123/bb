@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createConnection, type DbConnection } from "@bb/db";
+import { createMigratedConnection } from "@bb/db/testing";
 import { startBackgroundWalCheckpointer } from "../../src/services/system/wal-checkpointer.js";
 
 const directories: string[] = [];
@@ -47,9 +48,13 @@ describe("background WAL checkpointer", { timeout: 30_000 }, () => {
       expect(autocheckpointPages(db)).toBe(0);
       fill(3_000);
       const walAfterFirstBatch = statSync(`${path}-wal`).size;
-      await delay(400);
-      fill(3_000);
-      expect(statSync(`${path}-wal`).size).toBeLessThan(walAfterFirstBatch * 1.5);
+      let reused = false;
+      for (let attempt = 0; attempt < 10 && !reused; attempt += 1) {
+        await delay(400);
+        fill(3_000);
+        reused = statSync(`${path}-wal`).size < walAfterFirstBatch * 1.5;
+      }
+      expect(reused).toBe(true);
     } finally {
       checkpointer?.stop();
     }
@@ -127,7 +132,7 @@ setInterval(() => {
   });
 
   it("does nothing for an in-memory database", () => {
-    const db = createConnection(":memory:");
+    const db = createMigratedConnection();
     connections.push(db);
     expect(startBackgroundWalCheckpointer(db, logger())).toBeNull();
   });

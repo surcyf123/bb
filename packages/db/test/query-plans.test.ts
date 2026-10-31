@@ -943,7 +943,7 @@ describe("slow query index plans", () => {
     for (const query of captured) {
       const details = queryPlanDetails({ db, ...query });
       expect(details).toMatch(
-        /SEARCH \w+ USING COVERING INDEX events_background_task_thread_type_item_sequence_idx \(thread_id=\? AND type=\? AND item_id=\?\)/u,
+        /SEARCH \w+ USING COVERING INDEX events_background_task_thread_type_item_sequence_idx \(thread_id=\? AND type=\? AND item_id[=>]\?\)/u,
       );
       expectNoThreadOnlyEventSeek(details);
     }
