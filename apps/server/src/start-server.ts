@@ -1,5 +1,6 @@
 import { createDesktopAppUpdateService } from "./services/system/desktop-app-update.js";
 import { createDesktopUpdateChannel } from "./services/system/desktop-update-channel.js";
+import { setOutlineCacheSlowWriteReporter } from "./services/threads/conversation-outline-persistence.js";
 import { serve } from "@hono/node-server";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
@@ -126,6 +127,9 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     dataDir: serverConfig.BB_DATA_DIR,
     logger,
   });
+  setOutlineCacheSlowWriteReporter((write) =>
+    logger.warn(write, "Slow conversation outline cache write"),
+  );
   const serverImport = await applyServerImportAtBoot({
     dataDir: serverConfig.BB_DATA_DIR,
     db,
