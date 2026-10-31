@@ -11,6 +11,7 @@ import {
   dropThreadParentNotificationsColumn,
   dropQueuedMessageEditHeldUntilColumn,
   rewindQueuedMessageStateMigration,
+  QUEUED_MESSAGE_STATE_MIGRATION_WHEN,
 } from "./helpers/rewind.js";
 import { defaultAppSettings } from "@bb/domain";
 import {
@@ -3800,6 +3801,114 @@ describe("migrate", () => {
             DELETE FROM __drizzle_migrations
             WHERE created_at = ?
           `,
+        )
+        .run(threadPinningMigrationWhen);
+
+      expect(() => migrate(db)).toThrow(
+        /Missing applied migration timestamps: 0008_thread_pinning/,
+      );
+    } finally {
+      closeConnection(db);
+    }
+  });
+
+  it("applies upstream migrations that sort before a newer local migration row", () => {
+    const db = createConnection(":memory:");
+    const localMigrationWhen = 1792059867452;
+
+    try {
+      migrate(db);
+      const host = upsertHost(db, noopNotifier, {
+        id: "host-local-ledger",
+        name: "Migration Host",
+      });
+      const { project } = createProject(db, noopNotifier, {
+        name: "Migration Project",
+        source: {
+          type: "local_path",
+          hostId: host.id,
+          path: "/tmp/local-ledger",
+        },
+      });
+      const thread = createThread(db, noopNotifier, {
+        projectId: project.id,
+        providerId: "codex",
+      });
+      const queued = createQueuedThreadMessage(db, noopNotifier, {
+        threadId: thread.id,
+        content: [{ type: "text", text: "queued before upgrade", mentions: [] }],
+        model: "gpt-5",
+        permissionMode: "full",
+        reasoningLevel: "medium",
+        serviceTier: "default",
+        waitingOn: null,
+        sendAt: null,
+        payload: { kind: "inline" },
+        systemNotice: null,
+      });
+      rewindQueuedMessageStateMigration(db);
+      dropThreadParentNotificationsColumn(db);
+      db.$client.exec(`
+        ALTER TABLE queued_thread_messages ADD bb_local_originally_scheduled_at integer;
+        CREATE TABLE bb_local_child_notification_outbox (
+          source_key text PRIMARY KEY NOT NULL,
+          data text NOT NULL
+        );
+        INSERT INTO bb_local_child_notification_outbox (source_key, data)
+          VALUES ('local-source', '{}');
+      `);
+      db.$client
+        .prepare<InsertMigrationParameters>(
+          "INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)",
+        )
+        .run("bb-local-child-notification-outbox", localMigrationWhen);
+
+      expect(() => migrate(db)).not.toThrow();
+
+      const appliedCreatedAts = db.$client
+        .prepare<[], { createdAt: number }>(
+          "SELECT created_at AS createdAt FROM __drizzle_migrations",
+        )
+        .all()
+        .map((row) => row.createdAt);
+      expect(appliedCreatedAts).toContain(QUEUED_MESSAGE_STATE_MIGRATION_WHEN);
+      expect(appliedCreatedAts).toContain(localMigrationWhen);
+      expect(
+        db.$client
+          .prepare<[string], { state: string }>(
+            "SELECT state FROM queued_thread_messages WHERE id = ?",
+          )
+          .get(queued.id),
+      ).toEqual({ state: "queued" });
+      expect(
+        db.$client
+          .prepare<[], TableInfoRow>("PRAGMA table_info(threads)")
+          .all()
+          .some((column) => column.name === "parent_notifications"),
+      ).toBe(true);
+      expect(
+        db.$client
+          .prepare("SELECT source_key FROM bb_local_child_notification_outbox")
+          .all(),
+      ).toEqual([{ source_key: "local-source" }]);
+    } finally {
+      closeConnection(db);
+    }
+  });
+
+  it("still rejects a missing migration behind upstream rows when no local row is newer", () => {
+    const db = createConnection(":memory:");
+
+    try {
+      migrate(db);
+      db.$client
+        .prepare<InsertMigrationParameters>(
+          "INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)",
+        )
+        .run("bb-local-old", threadPinningMigrationWhen - 1);
+      db.$client
+        .prepare<DeleteMigrationParameters>(
+          "DELETE FROM __drizzle_migrations WHERE created_at = ?",
         )
         .run(threadPinningMigrationWhen);
 
