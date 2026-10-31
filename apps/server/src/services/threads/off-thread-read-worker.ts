@@ -23,11 +23,8 @@ import {
   clearTimelineOrderingContextCache,
   configureTimelineOrderingContextCache,
 } from "./timeline-context-order.js";
-import {
-  DEFAULT_MAX_INLINE_OUTPUT_CHARS,
-  truncateTimelineResponseOutputs,
-} from "./timeline-output-truncation.js";
-import { previewTimelineResponseOutputs } from "./timeline-output-preview.js";
+import { shortenTimelineResponseOutputs } from "./timeline-output-shortening.js";
+import { timelineWindowTag } from "./timeline-window-tag.js";
 
 const OUTLINE_CACHE_MAX_ENTRIES = 32;
 const OUTLINE_PREWARM_INTERVAL_MS = 2_000;
@@ -188,18 +185,13 @@ function buildTimeline(request: Extract<ReadRequest, { kind: "timeline" }>) {
   const { profile, response } = buildThreadTimelineWithProfile(
     db,
     request.thread,
-    { ...options, maxInlineOutputChars: DEFAULT_MAX_INLINE_OUTPUT_CHARS },
+    options,
   );
-  const truncated = truncateTimelineResponseOutputs(
-    response,
-    DEFAULT_MAX_INLINE_OUTPUT_CHARS,
-  );
-  return {
-    full: options.includeNestedRows
-      ? truncated
-      : previewTimelineResponseOutputs(truncated),
-    profile,
-  };
+  const window = shortenTimelineResponseOutputs(response, {
+    maxInlineOutputChars: options.maxInlineOutputChars,
+    preview: options.includeNestedRows !== true,
+  });
+  return { full: { ...window, tag: timelineWindowTag(window) }, profile };
 }
 
 type OutlineRequest = Extract<ReadRequest, { kind: "outline" }>;

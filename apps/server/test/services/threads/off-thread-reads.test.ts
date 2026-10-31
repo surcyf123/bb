@@ -29,9 +29,9 @@ import {
 } from "../../../src/services/threads/timeline.js";
 import {
   DEFAULT_MAX_INLINE_OUTPUT_CHARS,
-  truncateTimelineResponseOutputs,
-} from "../../../src/services/threads/timeline-output-truncation.js";
-import { previewTimelineResponseOutputs } from "../../../src/services/threads/timeline-output-preview.js";
+  shortenTimelineResponseOutputs,
+} from "../../../src/services/threads/timeline-output-shortening.js";
+import { timelineWindowTag } from "../../../src/services/threads/timeline-window-tag.js";
 
 const workerUrl = new URL(
   "../../../src/services/threads/off-thread-read-worker.ts",
@@ -218,13 +218,16 @@ describe("off-thread timeline builds", { timeout: 60_000 }, () => {
       const current = getThread(db, thread.id);
       if (current === null) throw new Error("missing thread");
       const options = {
+        compactionOfferEnabled: false,
         completedTurnDisplay: "collapse" as const,
         eventBudget: 1_500,
         includeClearedContextHistory: false,
         includeDiagnosticOperations: false,
         maxSeq: getLatestThreadSequence(db, { threadId: thread.id }),
         page: { kind: "latest" as const, segmentLimit: 20 },
+        maxInlineOutputChars: DEFAULT_MAX_INLINE_OUTPUT_CHARS,
         planCommand: null,
+        summarizeShellCommands: false,
         ...view,
       };
       const built = await buildThreadTimelineOffThread(
@@ -238,17 +241,16 @@ describe("off-thread timeline builds", { timeout: 60_000 }, () => {
         },
         JSON.stringify(view),
       );
-      const { response } = buildThreadTimelineWithProfile(db, current, {
-        ...options,
-        maxInlineOutputChars: DEFAULT_MAX_INLINE_OUTPUT_CHARS,
-      });
-      const truncated = truncateTimelineResponseOutputs(
-        response,
-        DEFAULT_MAX_INLINE_OUTPUT_CHARS,
+      const { response } = buildThreadTimelineWithProfile(
+        db,
+        current,
+        options,
       );
-      const expected = view.includeNestedRows
-        ? truncated
-        : previewTimelineResponseOutputs(truncated);
+      const window = shortenTimelineResponseOutputs(response, {
+        maxInlineOutputChars: DEFAULT_MAX_INLINE_OUTPUT_CHARS,
+        preview: !view.includeNestedRows,
+      });
+      const expected = { ...window, tag: timelineWindowTag(window) };
       expect(JSON.stringify(built?.full)).toBe(JSON.stringify(expected));
       expect(built?.profile).toBeDefined();
     } finally {

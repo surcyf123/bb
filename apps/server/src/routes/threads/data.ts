@@ -1,6 +1,5 @@
 import { extractThreadContextWindowUsage } from "@bb/thread-view";
 import {
-  buildThreadTimelineOffThread,
   readConversationOutlineOffThread,
 } from "../../services/threads/off-thread-reads.js";
 import {
@@ -157,7 +156,6 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     onValidationError: (msg) => new ApiError(400, "invalid_request", msg),
   });
   const routes = publicApiRoutes.threads;
-  const timelineWindows = createThreadTimelineWindows(deps);
   const conversationOutlineCache = new Map<
     string,
     ThreadConversationOutlineResponse["items"]
@@ -166,6 +164,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
   const offThreadTarget = deps.db.$client.memory
     ? null
     : { databasePath: deps.db.$client.name, logger: deps.logger };
+  const timelineWindows = createThreadTimelineWindows(deps, offThreadTarget);
   const resolveConversationRowsOptions = (thread: Thread) => {
     const providerDisplayName = resolveThreadProviderDisplayName(
       deps,
@@ -251,7 +250,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
   get(routes.timeline, async (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
     return context.json(
-      timelineWindows.read(
+      await timelineWindows.read(
         thread,
         {
           deferContent: query.deferContent === "true",

@@ -1,13 +1,11 @@
 import { Worker } from "node:worker_threads";
 import type { ThreadTimelineResponse } from "@bb/server-contract";
-import type {
-  CompletedTurnDisplay,
-  ProviderComposerCommand,
-  Thread,
-} from "@bb/domain";
+import type { CompletedTurnDisplay, Thread } from "@bb/domain";
 import type { ServerLogger } from "../../types.js";
-import type { ThreadTimelineBuildProfile } from "./timeline.js";
-import type { ThreadTimelinePageRequest } from "./timeline-pagination.js";
+import type {
+  BuildThreadTimelineOptions,
+  ThreadTimelineBuildProfile,
+} from "./timeline.js";
 
 const READ_TIMEOUT_MS = 120_000;
 const FAILURES_BEFORE_PAUSE = 3;
@@ -15,19 +13,9 @@ const PAUSE_AFTER_FAILURES_MS = 5 * 60_000;
 
 export type OffThreadReadKind = "outline" | "timeline";
 
-export interface OffThreadTimelineOptions {
-  completedTurnDisplay: CompletedTurnDisplay;
-  deferContent: boolean;
-  eventBudget: number;
-  includeClearedContextHistory: boolean;
-  includeDiagnosticOperations: boolean;
-  includeNestedRows: boolean;
-  maxSeq: number;
-  page: ThreadTimelinePageRequest;
-  planCommand: ProviderComposerCommand | null;
-  providerDisplayName?: string;
-  summaryOnly: boolean;
-}
+export type OffThreadTimelineOptions = BuildThreadTimelineOptions & {
+  maxInlineOutputChars: number;
+};
 
 export interface OffThreadTimelineResult {
   full: ThreadTimelineResponse;
@@ -57,7 +45,7 @@ export type OffThreadReadRequest =
       options: OffThreadTimelineOptions;
     };
 
-interface OffThreadReadTarget {
+export interface OffThreadReadTarget {
   databasePath: string;
   logger: Pick<ServerLogger, "warn">;
   workerUrl?: URL;

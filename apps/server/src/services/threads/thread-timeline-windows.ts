@@ -1,5 +1,11 @@
 import { performance } from "node:perf_hooks";
-import { getAppSettings, getLatestThreadSequence, getThread } from "@bb/db";
+import {
+  getAppSettings,
+  getLatestThreadSequence,
+  getThread,
+  getThreadEventRewriteGeneration,
+  getThreadEventStructuralGeneration,
+} from "@bb/db";
 import {
   DEFAULT_COMPLETED_TURN_DISPLAY,
   type AppSettings,
@@ -38,6 +44,10 @@ import {
   shortenTimelineResponseOutputs,
 } from "./timeline-output-shortening.js";
 import type { ThreadTimelinePageRequest } from "./timeline-pagination.js";
+import {
+  buildThreadTimelineOffThread,
+  type OffThreadReadTarget,
+} from "./off-thread-reads.js";
 
 type ThreadTimelineWindowDeps = Pick<
   AppDeps,
@@ -66,6 +76,8 @@ interface TargetPushes {
 
 interface ThreadPushSchedule {
   nextAllowedAt: number;
+  rerun: boolean;
+  running: boolean;
   timer: ReturnType<typeof setTimeout> | null;
 }
 
@@ -74,7 +86,7 @@ export interface ThreadTimelineWindows {
     thread: Thread,
     request: ThreadTimelineWindowRequest,
     afterTag: string | undefined,
-  ): ThreadTimelineReadResponse;
+  ): Promise<ThreadTimelineReadResponse>;
 }
 
 export function resolveThreadProviderDisplayName(
@@ -110,6 +122,7 @@ function latestWindowKey(
 
 export function createThreadTimelineWindows(
   deps: ThreadTimelineWindowDeps,
+  offThreadTarget: OffThreadReadTarget | null = null,
 ): ThreadTimelineWindows {
   const timelineCache = createThreadTimelineCache();
   const servedWindows = createTimelineServedWindowsCache({
@@ -124,10 +137,10 @@ export function createThreadTimelineWindows(
     logger: deps.logger,
   });
 
-  function buildWindow(
+  async function buildWindow(
     thread: Thread,
     request: ThreadTimelineWindowRequest,
-  ): ThreadTimelineResponse {
+  ): Promise<ThreadTimelineResponse> {
     const providerDisplayName = resolveThreadProviderDisplayName(
       deps,
       thread.providerId,
@@ -156,28 +169,54 @@ export function createThreadTimelineWindows(
       providerDisplayName,
       summarizeShellCommands: settings.summarizeShellCommands,
     };
+    const cacheKey = buildThreadTimelineCacheKey({
+      threadId: thread.id,
+      maxSeq,
+      status: thread.status,
+      surface: resolveThreadTimelineSurface(deps.db, thread, surfaceOptions)
+        .cacheKey,
+      page: request.page,
+      summaryOnly: request.summaryOnly,
+    });
+    const buildOptions = {
+      ...surfaceOptions,
+      eventBudget: deps.config.featureFlags.timelineWindowEventBudget,
+      maxSeq,
+      page: request.page,
+      summaryOnly: request.summaryOnly,
+    };
+    const cached = timelineCache.get(cacheKey);
+    if (cached !== undefined) {
+      return cached;
+    }
+    if (offThreadTarget !== null) {
+      const built = await buildThreadTimelineOffThread(
+        offThreadTarget,
+        {
+          threadId: thread.id,
+          rewriteGeneration: getThreadEventRewriteGeneration(thread.id),
+          structuralGeneration: getThreadEventStructuralGeneration(thread.id),
+          thread,
+          options: buildOptions,
+        },
+        cacheKey,
+      );
+      if (built !== null) {
+        slowTimelineBuildLogger.log({
+          profile: built.profile,
+          threadId: thread.id,
+        });
+        return timelineCache.getOrBuild(thread.id, cacheKey, () => built.full);
+      }
+    }
     return timelineCache.getOrBuild(
       thread.id,
-      buildThreadTimelineCacheKey({
-        threadId: thread.id,
-        maxSeq,
-        status: thread.status,
-        surface: resolveThreadTimelineSurface(deps.db, thread, surfaceOptions)
-          .cacheKey,
-        page: request.page,
-        summaryOnly: request.summaryOnly,
-      }),
+      cacheKey,
       () => {
         const { profile, response: built } = buildThreadTimelineWithProfile(
           deps.db,
           thread,
-          {
-            ...surfaceOptions,
-            eventBudget: deps.config.featureFlags.timelineWindowEventBudget,
-            maxSeq,
-            page: request.page,
-            summaryOnly: request.summaryOnly,
-          },
+          buildOptions,
         );
         slowTimelineBuildLogger.log({ profile, threadId: thread.id });
         const window = shortenTimelineResponseOutputs(built, {
@@ -189,19 +228,20 @@ export function createThreadTimelineWindows(
     );
   }
 
-  function pushTarget(
+  async function pushTarget(
     thread: Thread,
     target: ThreadTimelineSubscriptionTarget,
-  ): TargetPushes | null {
+  ): Promise<TargetPushes | null> {
     const segmentLimit =
       target.segmentLimit ?? THREAD_TIMELINE_DEFAULT_SEGMENT_LIMIT;
     if (segmentLimit > THREAD_TIMELINE_SEGMENT_LIMIT_MAX) {
       return null;
     }
-    const subscribers = deps.hub
-      .listThreadTimelineSubscribers(target)
-      .filter(({ baseline }) => baseline.kind !== "pending");
-    if (subscribers.length === 0) {
+    const listSubscribers = () =>
+      deps.hub
+        .listThreadTimelineSubscribers(target)
+        .filter(({ baseline }) => baseline.kind !== "pending");
+    if (listSubscribers().length === 0) {
       return null;
     }
     const request: ThreadTimelineWindowRequest = {
@@ -211,7 +251,11 @@ export function createThreadTimelineWindows(
       summaryOnly: false,
     };
     const windowKey = latestWindowKey(request, segmentLimit);
-    const response = buildWindow(thread, request);
+    const response = await buildWindow(thread, request);
+    const subscribers = listSubscribers();
+    if (subscribers.length === 0) {
+      return null;
+    }
     const hasLegacySubscribers = subscribers.some(
       ({ baseline }) => baseline.kind === "legacy",
     );
@@ -260,7 +304,7 @@ export function createThreadTimelineWindows(
     return { pushes, response, windowKey };
   }
 
-  function pushThread(threadId: string): void {
+  async function pushThread(threadId: string): Promise<void> {
     const targets = deps.hub
       .listWatchedTargets("thread-timeline")
       .filter((target) => target.threadId === threadId);
@@ -273,7 +317,7 @@ export function createThreadTimelineWindows(
     }
     for (const target of targets) {
       const startedAt = performance.now();
-      const targetPushes = pushTarget(thread, target);
+      const targetPushes = await pushTarget(thread, target);
       if (targetPushes === null) {
         continue;
       }
@@ -298,15 +342,16 @@ export function createThreadTimelineWindows(
     }
   }
 
-  function runScheduledPush(threadId: string): void {
+  async function runScheduledPush(threadId: string): Promise<void> {
     const schedule = pushSchedulesByThreadId.get(threadId);
     if (schedule === undefined) {
       return;
     }
     schedule.timer = null;
+    schedule.running = true;
     const startedAt = performance.now();
     try {
-      pushThread(threadId);
+      await pushThread(threadId);
     } catch (error) {
       deps.logger.warn(
         {
@@ -317,21 +362,32 @@ export function createThreadTimelineWindows(
       );
     }
     const finishedAt = performance.now();
+    schedule.running = false;
     schedule.nextAllowedAt =
       finishedAt + Math.min(MAX_PUSH_PAUSE_MS, finishedAt - startedAt);
+    if (schedule.rerun && pushSchedulesByThreadId.get(threadId) === schedule) {
+      schedule.rerun = false;
+      schedulePush(threadId);
+    }
   }
 
   function schedulePush(threadId: string): void {
     const schedule = pushSchedulesByThreadId.get(threadId) ?? {
       nextAllowedAt: 0,
+      rerun: false,
+      running: false,
       timer: null,
     };
     pushSchedulesByThreadId.set(threadId, schedule);
     if (schedule.timer !== null) {
       return;
     }
+    if (schedule.running) {
+      schedule.rerun = true;
+      return;
+    }
     schedule.timer = setTimeout(
-      () => runScheduledPush(threadId),
+      () => void runScheduledPush(threadId),
       Math.max(0, schedule.nextAllowedAt - performance.now()),
     );
   }
@@ -373,8 +429,8 @@ export function createThreadTimelineWindows(
   });
 
   return {
-    read(thread, request, afterTag) {
-      const response = buildWindow(thread, request);
+    async read(thread, request, afterTag) {
+      const response = await buildWindow(thread, request);
       const previous =
         afterTag === undefined
           ? undefined
