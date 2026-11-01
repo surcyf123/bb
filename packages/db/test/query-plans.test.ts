@@ -33,6 +33,8 @@ import {
   getLastStoredProviderThreadId,
   insertEvents,
   isStoredTurnProviderCompactionRunning,
+  pruneTokenUsageEventsInTransaction,
+  listStoredClientTurnRequestRowsByKeys,
   listActiveBackgroundTaskCountsByThreadIds,
   listItemEventSpansByItems,
   listLatestBackgroundTaskStateRowsByItemIds,
@@ -905,6 +907,128 @@ describe("slow query index plans", () => {
       "SEARCH events USING INDEX events_delegating_item_lookup_idx (thread_id=? AND item_id=?)",
     );
     expectNoThreadOnlyEventSeek(details);
+
+    db.$client.close();
+  });
+
+  it("deletes usage snapshot candidates by primary key instead of walking the thread's snapshots", () => {
+    const { db, thread } = setup();
+    const ids = Array.from({ length: 60 }, (_, index) => `usage-${index}`);
+    insertEvents(
+      db,
+      noopNotifier,
+      ids.map((_, index) => ({
+        threadId: thread.id,
+        sequence: index + 1,
+        type: "thread/tokenUsage/updated" as const,
+        scope: threadScope(),
+        itemId: null,
+        itemKind: null,
+        parentToolCallId: null,
+        data: JSON.stringify({ total: index }),
+      })),
+    );
+    const candidates = db.$client
+      .prepare<[string], { id: string }>(
+        "SELECT id FROM events WHERE thread_id = ? AND sequence <= 8 ORDER BY sequence",
+      )
+      .all(thread.id)
+      .map((row) => row.id);
+    const statements: CapturedStatement[] = [];
+    const raw = db.$client;
+    const originalPrepare = raw.prepare.bind(raw);
+    Object.defineProperty(raw, "prepare", {
+      configurable: true,
+      writable: true,
+      value: (source: string) => {
+        const statement = originalPrepare(source);
+        const originalRun = statement.run.bind(statement);
+        statement.run = (...params: unknown[]) => {
+          statements.push({ params: params as SqliteParameter[], sql: source });
+          return originalRun(...params);
+        };
+        return statement;
+      },
+    });
+    let removed = 0;
+    try {
+      removed = pruneTokenUsageEventsInTransaction(db, {
+        threadId: thread.id,
+        candidateIds: candidates,
+        usageKeepers: { latestRootSequence: 60, latestContextSequence: 0 },
+        afterSequence: 0,
+        throughSequence: 8,
+      });
+    } finally {
+      Object.defineProperty(raw, "prepare", {
+        configurable: true,
+        writable: true,
+        value: originalPrepare,
+      });
+    }
+    expect(removed).toBe(8);
+    const remaining = db.$client
+      .prepare<[string], { count: number }>("SELECT COUNT(*) AS count FROM events WHERE thread_id = ?")
+      .get(thread.id)!.count;
+    expect(remaining).toBe(52);
+    const deletion = statements.find((statement) => statement.sql.trimStart().startsWith("DELETE"));
+    if (!deletion) {
+      throw new Error("Expected the usage snapshot DELETE");
+    }
+    const details = queryPlanDetails({ db, ...deletion });
+    expect(details.split("\n")[0]).toBe(
+      "SEARCH events USING INDEX sqlite_autoindex_events_1 (id=?)",
+    );
+    expect(details).not.toContain("events_thread_type_sequence_idx (thread_id=? AND type=? AND sequence<?)");
+
+    db.$client.close();
+  });
+
+  it("seeks client turn requests by thread and request id through the request index", () => {
+    const { db, project, thread } = setup();
+    const other = createThread(db, noopNotifier, {
+      projectId: project.id,
+      providerId: "codex",
+    });
+    const request = (threadId: string, sequence: number, requestId: string) => ({
+      threadId,
+      sequence,
+      type: "client/turn/requested" as const,
+      scope: threadScope(),
+      itemId: null,
+      itemKind: null,
+      parentToolCallId: null,
+      data: JSON.stringify({ requestId }),
+    });
+    insertEvents(db, noopNotifier, [
+      ...Array.from({ length: 30 }, (_, index) => request(thread.id, index + 1, `filler-${index}`)),
+      request(thread.id, 31, "wanted-a"),
+      request(thread.id, 32, "wanted-b"),
+      request(other.id, 1, "wanted-a"),
+    ]);
+
+    const [query] = captureStatements(db, () => {
+      expect(
+        listStoredClientTurnRequestRowsByKeys(db, {
+          keys: [
+            { threadId: thread.id, requestId: "wanted-b" },
+            { threadId: other.id, requestId: "wanted-a" },
+            { threadId: thread.id, requestId: "wanted-a" },
+            { threadId: thread.id, requestId: "missing" },
+          ],
+        }).map((row) => [row.threadId === thread.id ? "thread" : "other", row.sequence]),
+      ).toEqual(
+        thread.id.localeCompare(other.id) < 0
+          ? [["thread", 31], ["thread", 32], ["other", 1]]
+          : [["other", 1], ["thread", 31], ["thread", 32]],
+      );
+    });
+    if (!query) {
+      throw new Error("Expected the client turn request lookup SQL");
+    }
+    expect(queryPlanDetails({ db, ...query })).toContain(
+      "SEARCH event USING INDEX events_client_turn_request_id_idx (thread_id=? AND <expr>=?)",
+    );
 
     db.$client.close();
   });

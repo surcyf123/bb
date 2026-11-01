@@ -127,6 +127,42 @@ describe("off-thread conversation outline reads", { timeout: 60_000 }, () => {
     }
   });
 
+  it("filters the outline by role in the worker", async () => {
+    const { db, thread, add, target, loadInProcess } = await fixture();
+    try {
+      add(1, "First message");
+      add(2, "Second message");
+      const read = (role: string) =>
+        readConversationOutlineOffThread(target, {
+          threadId: thread.id,
+          rewriteGeneration: getThreadEventRewriteGeneration(thread.id),
+          structuralGeneration: getThreadEventStructuralGeneration(thread.id),
+          outlineOptions: {
+            completedTurnDisplay: "collapse",
+            includeClearedContextHistory: false,
+          },
+          role,
+        });
+      const full = loadInProcess();
+      for (const role of ["user", "assistant"]) {
+        const body = await read(role);
+        expect(body).toBe(
+          JSON.stringify({
+            items: full.items.filter((item) => item.role === role),
+            maxSeq: full.maxSeq,
+          }),
+        );
+      }
+      const roles = new Set(full.items.map((item) => item.role));
+      expect(roles.size).toBeGreaterThan(0);
+      expect(
+        ["user", "assistant"].some((role) => roles.has(role as never)),
+      ).toBe(true);
+    } finally {
+      db.$client.close();
+    }
+  });
+
   it("does not reuse an outline from before a history rewrite", async () => {
     const { db, thread, add, readOutline, loadInProcess } = await fixture("idle");
     try {

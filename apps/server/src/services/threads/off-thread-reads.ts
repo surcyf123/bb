@@ -35,6 +35,7 @@ export type OffThreadReadRequest =
       rewriteGeneration: number;
       structuralGeneration: number;
       outlineOptions: OffThreadOutlineOptions;
+      role?: string;
     }
   | {
       kind: "timeline";
@@ -180,7 +181,7 @@ export async function readConversationOutlineOffThread(
   const result = await requestOffThread(
     target,
     { kind: "outline", ...request },
-    JSON.stringify([request.threadId, request.outlineOptions]),
+    JSON.stringify([request.threadId, request.outlineOptions, request.role ?? null]),
   );
   return typeof result === "string" ? result : null;
 }

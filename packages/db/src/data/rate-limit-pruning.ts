@@ -21,7 +21,7 @@ export function pruneRateLimitSnapshotWindow(
     rows.length === 0
       ? 0
       : db.run(sql`
-    DELETE FROM events WHERE id IN (${sql.join(
+    DELETE FROM events INDEXED BY sqlite_autoindex_events_1 WHERE id IN (${sql.join(
       rows.map((row) => sql`${row.id}`),
       sql`, `,
     )})

@@ -265,7 +265,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
 
   get(routes.conversationOutline, async (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
-    if (offThreadTarget !== null && query.role === undefined) {
+    if (offThreadTarget !== null) {
       const { maxSeq: _maxSeq, ...outlineOptions } =
         resolveConversationRowsOptions(thread);
       const body = await readConversationOutlineOffThread(offThreadTarget, {
@@ -273,6 +273,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
         rewriteGeneration: getThreadEventRewriteGeneration(thread.id),
         structuralGeneration: getThreadEventStructuralGeneration(thread.id),
         outlineOptions,
+        ...(query.role === undefined ? {} : { role: query.role }),
       });
       if (body !== null) {
         return context.body(body, 200, { "Content-Type": "application/json" });

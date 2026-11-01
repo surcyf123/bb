@@ -223,7 +223,7 @@ function pruneResolvedItemCandidates(
     discarded.length === 0
       ? 0
       : db.run(
-          sql`DELETE FROM events WHERE id IN (${sql.join(
+          sql`DELETE FROM events INDEXED BY sqlite_autoindex_events_1 WHERE id IN (${sql.join(
             discarded.map((id) => sql`${id}`),
             sql`, `,
           )}) AND ${isBeforeLatestThreadEvent(args.threadId)}`,

@@ -46,6 +46,7 @@ const baseRequestSchema = z.object({
 const requestSchema = z.discriminatedUnion("kind", [
   baseRequestSchema.extend({
     kind: z.literal("outline"),
+    role: z.string().optional(),
     outlineOptions: z.object({
       completedTurnDisplay: completedTurnDisplaySchema,
       includeClearedContextHistory: z.boolean(),
@@ -173,7 +174,15 @@ function readOutline(
       if (oldest === undefined) break;
       outlineItemsCache.delete(oldest);
     }
-    const result = `{"items":${itemsJson},"maxSeq":${JSON.stringify(maxSeq)}}`;
+    const selected =
+      request.role === undefined
+        ? itemsJson
+        : JSON.stringify(
+            (JSON.parse(itemsJson) as { role?: string }[]).filter(
+              (item) => item.role === request.role,
+            ),
+          );
+    const result = `{"items":${selected},"maxSeq":${JSON.stringify(maxSeq)}}`;
     reply?.(result);
     runDeferredAudits();
     return result;

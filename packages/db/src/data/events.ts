@@ -1785,32 +1785,24 @@ export function listStoredClientTurnRequestRowsByKeys(
 ): StoredEventRow[] {
   const rows = queryInSqliteVariableBatches({
     dedupeKey: (key) => `${key.threadId}\0${key.requestId}`,
-    fixedVariableCount: 1,
+    fixedVariableCount: 0,
     maximumValueCount: CLIENT_TURN_REQUEST_KEY_BATCH_SIZE,
     queryBatch: (keys) => {
-      const requestType = "client/turn/requested" satisfies ThreadEventType;
-      const requestIdsByThread = new Map<string, string[]>();
-      for (const key of keys) {
-        const requestIds = requestIdsByThread.get(key.threadId) ?? [];
-        requestIds.push(key.requestId);
-        requestIdsByThread.set(key.threadId, requestIds);
-      }
-      const keyConditions = [...requestIdsByThread].map(
-        ([threadId, requestIds]) =>
-          and(
-            eq(events.threadId, threadId),
-            inArray(
-              sql<string>`json_extract(${events.data}, '$.requestId')`,
-              requestIds,
-            ),
-          ),
+      const requestKeys = sql.join(
+        keys.map((key) => sql`(${key.threadId}, ${key.requestId})`),
+        sql`, `,
       );
-      return db
-        .select(storedEventRowFields)
-        .from(events)
-        .where(and(eq(events.type, requestType), or(...keyConditions)))
-        .orderBy(events.threadId, events.sequence)
-        .all();
+      return db.all<StoredEventRow>(sql`
+        SELECT event.created_at AS createdAt, event.data AS data, event.id AS id, event.item_id AS itemId,
+          event.item_kind AS itemKind, event.parent_tool_call_id AS parentToolCallId,
+          event.provider_thread_id AS providerThreadId, event.scope_kind AS scopeKind, event.sequence AS sequence,
+          event.thread_id AS threadId, event.turn_id AS turnId, event.type AS type
+        FROM (VALUES ${requestKeys}) AS request_keys
+        CROSS JOIN events AS event INDEXED BY events_client_turn_request_id_idx
+        WHERE event.type = 'client/turn/requested'
+          AND event.thread_id = request_keys.column1
+          AND json_extract(event.data, '$.requestId') = request_keys.column2
+      `);
     },
     values: args.keys,
     variableCountPerValue: 2,
@@ -4837,7 +4829,7 @@ function pruneUsageSnapshots(
     )
       return 0;
   }
-  return db.run(sql`DELETE FROM events
+  return db.run(sql`DELETE FROM events INDEXED BY sqlite_autoindex_events_1
     WHERE id IN (${pruningCandidates(args)}) AND thread_id = ${args.threadId}
       AND type = ${args.eventType}
       AND ${isBeforeLatestThreadEvent(args.threadId)}

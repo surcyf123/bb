@@ -816,6 +816,9 @@ export const events = sqliteTable(
     index("events_delegating_item_lookup_idx")
       .on(table.threadId, table.itemId, table.sequence, table.itemKind)
       .where(sql`${table.itemKind} IN ('toolCall', 'delegation')`),
+    index("events_client_turn_request_id_idx")
+      .on(table.threadId, sql`json_extract(${table.data}, '$.requestId')`)
+      .where(sql`${table.type} = 'client/turn/requested'`),
     index("events_plan_steps_thread_sequence_idx")
       .on(table.threadId, table.sequence)
       .where(
