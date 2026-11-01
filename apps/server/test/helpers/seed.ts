@@ -43,7 +43,7 @@ import type {
   ThreadVisibility,
 } from "@bb/domain";
 import type { AppDeps } from "../../src/types.js";
-import { ARCHIVE_UNDO_GRACE_MS } from "../../src/constants.js";
+import { ARCHIVE_UNDO_GRACE_MS, LEASE_TIMEOUT_MS } from "../../src/constants.js";
 import { registerTestHostRpcCapture } from "./commands.js";
 
 interface SeedEventArgs<TType extends ThreadEventType> {
@@ -124,7 +124,7 @@ export function seedSession(
     dataDir: `/tmp/bb-host-data/${hostId}`,
     protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
     heartbeatIntervalMs: 5_000,
-    leaseTimeoutMs: 30_000,
+    leaseTimeoutMs: LEASE_TIMEOUT_MS,
   });
   deps.hub.recordDaemonSessionPlatform(
     session.id,
