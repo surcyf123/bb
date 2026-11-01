@@ -2152,118 +2152,11 @@ export function listStoredClientTurnRequestIdsInRange(
   return rows.map((row) => clientTurnRequestIdSchema.parse(row.requestId));
 }
 
-interface TurnRequestIndex {
-  lastSequence: number;
-  sequenceByRequestId: Map<string, number>;
-}
-
-const turnRequestIndexes = new WeakMap<
-  DbQueryConnection,
-  Map<string, TurnRequestIndex>
->();
-
-function getTurnRequestIndex(
-  db: DbQueryConnection,
-  threadId: string,
-): TurnRequestIndex {
-  let indexes = turnRequestIndexes.get(db);
-  if (indexes === undefined) {
-    indexes = new Map();
-    turnRequestIndexes.set(db, indexes);
-  }
-  let index = indexes.get(threadId);
-  if (index === undefined) {
-    index = { lastSequence: -1, sequenceByRequestId: new Map() };
-    indexes.set(threadId, index);
-  }
-  const rows = db
-    .select({
-      sequence: events.sequence,
-      requestId: sql<unknown>`json_extract(${events.data}, '$.requestId')`,
-    })
-    .from(events)
-    .where(
-      and(
-        eq(events.threadId, threadId),
-        eq(events.type, "client/turn/requested"),
-        gt(events.sequence, index.lastSequence),
-      ),
-    )
-    .orderBy(events.sequence)
-    .all();
-  for (const row of rows) {
-    if (
-      typeof row.requestId === "string" &&
-      !index.sequenceByRequestId.has(row.requestId)
-    ) {
-      index.sequenceByRequestId.set(row.requestId, row.sequence);
-    }
-    index.lastSequence = row.sequence;
-  }
-  return index;
-}
-
 export function getStoredTurnRequestEventForTurn(
   db: DbQueryConnection,
   args: GetStoredTurnRequestEventForTurnArgs,
 ): StoredTurnRequestEventRow | null {
-  const requestId = getAcceptedClientRequestId(db, args);
-  if (requestId === null) return null;
-  const index = getTurnRequestIndex(db, args.threadId);
-  const sequence = index.sequenceByRequestId.get(requestId);
-  if (sequence !== undefined) {
-    const verified = db
-      .select({
-        data: events.data,
-        sequence: events.sequence,
-        threadId: events.threadId,
-        type: events.type,
-      })
-      .from(events)
-      .where(
-        and(
-          eq(events.threadId, args.threadId),
-          eq(events.sequence, sequence),
-          eq(events.type, "client/turn/requested"),
-          sql`json_extract(${events.data}, '$.requestId') = ${requestId}`,
-        ),
-      )
-      .limit(1)
-      .get();
-    if (verified !== undefined) return verified;
-    index.sequenceByRequestId.delete(requestId);
-  }
-  const found = getStoredTurnRequestEventForTurnUncached(db, args);
-  if (found !== null) index.sequenceByRequestId.set(requestId, found.sequence);
-  return found;
-}
-
-function getAcceptedClientRequestId(
-  db: DbQueryConnection,
-  args: GetStoredTurnRequestEventForTurnArgs,
-): string | null {
-  const acceptedInput =
-    db
-      .select({
-        clientRequestId: sql<
-          string | null
-        >`json_extract(${events.data}, '$.clientRequestId')`,
-      })
-      .from(events)
-      .where(
-        and(
-          eq(events.threadId, args.threadId),
-          eq(events.turnId, args.turnId),
-          eq(events.type, "turn/input/accepted"),
-        ),
-      )
-      .orderBy(desc(events.sequence))
-      .limit(1)
-      .get() ?? null;
-  const requestIdResult = clientTurnRequestIdSchema.safeParse(
-    acceptedInput?.clientRequestId,
-  );
-  return requestIdResult.success ? requestIdResult.data : null;
+  return getStoredTurnRequestEventForTurnUncached(db, args);
 }
 
 export function getStoredTurnRequestEventForTurnUncached(
@@ -2298,19 +2191,20 @@ export function getStoredTurnRequestEventForTurnUncached(
   return (
     db
       .select({
-        data: events.data,
-        sequence: events.sequence,
-        threadId: events.threadId,
-        type: events.type,
+        data: sql<string>`${events.data}`,
+        sequence: sql<number>`${events.sequence}`,
+        threadId: sql<string>`${events.threadId}`,
+        type: sql<StoredTurnRequestEventRow["type"]>`${events.type}`,
       })
-      .from(events)
+      .from(sql`${events} INDEXED BY events_client_turn_request_id_idx`)
       .where(
         and(
           eq(events.threadId, args.threadId),
-          eq(events.type, "client/turn/requested"),
+          sql`${events.type} = 'client/turn/requested'`,
           sql`json_extract(${events.data}, '$.requestId') = ${requestIdResult.data}`,
         ),
       )
+      .orderBy(sql`${events.sequence}`)
       .limit(1)
       .get() ?? null
   );

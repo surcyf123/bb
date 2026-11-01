@@ -1016,7 +1016,7 @@ export function deleteQueuedRetriesForThreadEventSuffixInTransaction(
             .where(
               and(
                 eq(events.threadId, args.threadId),
-                eq(events.type, "client/turn/requested"),
+                sql`${events.type} = 'client/turn/requested'`,
                 sql`${events.sequence} >= ${args.cutoffSequence}`,
                 sql`${events.sequence} <= ${args.oldMaxSequence}`,
                 sql`json_extract(${events.data}, '$.requestId') = ${queuedThreadMessages.retryOfTurnRequestId}`,
