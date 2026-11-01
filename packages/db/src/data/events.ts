@@ -4209,8 +4209,8 @@ export function isStoredTurnProviderCompactionRunning(
     eq(events.turnId, args.turnId),
   );
   const latestCompaction = db
-    .select({ type: events.type })
-    .from(events)
+    .select({ type: sql<string>`${events.type}` })
+    .from(sql`${events} INDEXED BY events_thread_type_item_kind_sequence_idx`)
     .where(
       and(
         inTurn,

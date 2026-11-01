@@ -32,6 +32,7 @@ import {
   listStoredEventRowsInSequenceRange,
   getLastStoredProviderThreadId,
   insertEvents,
+  isStoredTurnProviderCompactionRunning,
   listActiveBackgroundTaskCountsByThreadIds,
   listItemEventSpansByItems,
   listLatestBackgroundTaskStateRowsByItemIds,
@@ -904,6 +905,50 @@ describe("slow query index plans", () => {
       "SEARCH events USING INDEX events_delegating_item_lookup_idx (thread_id=? AND item_id=?)",
     );
     expectNoThreadOnlyEventSeek(details);
+
+    db.$client.close();
+  });
+
+  it("seeks a turn's compaction items through the item-kind index instead of every turn item", () => {
+    const { db, thread } = setup();
+    const items = Array.from({ length: 40 }, (_, index) => ({
+      threadId: thread.id,
+      sequence: index + 1,
+      type: index % 2 === 0 ? ("item/started" as const) : ("item/completed" as const),
+      scope: turnScope("turn-1"),
+      itemId: `command-${Math.floor(index / 2)}`,
+      itemKind: "commandExecution" as const,
+      parentToolCallId: null,
+      data: JSON.stringify({ item: { id: `command-${Math.floor(index / 2)}`, type: "commandExecution" } }),
+    }));
+    const compaction = (sequence: number, type: "item/started" | "item/completed") => ({
+      threadId: thread.id,
+      sequence,
+      type,
+      scope: turnScope("turn-1"),
+      itemId: "compaction-1",
+      itemKind: "contextCompaction" as const,
+      parentToolCallId: null,
+      data: JSON.stringify({ item: { id: "compaction-1", type: "contextCompaction" } }),
+    });
+    insertEvents(db, noopNotifier, [...items, compaction(41, "item/started")]);
+    const running = () =>
+      isStoredTurnProviderCompactionRunning(db, { threadId: thread.id, turnId: "turn-1" });
+
+    const [query] = captureStatements(db, () => {
+      expect(running()).toBe(true);
+    });
+    insertEvents(db, noopNotifier, [compaction(42, "item/completed")]);
+    expect(running()).toBe(false);
+    insertEvents(db, noopNotifier, [compaction(43, "item/started")]);
+    expect(running()).toBe(true);
+    expect(isStoredTurnProviderCompactionRunning(db, { threadId: thread.id, turnId: "turn-2" })).toBe(false);
+    if (!query) {
+      throw new Error("Expected the compaction lookup SQL");
+    }
+    expect(queryPlanDetails({ db, ...query })).toContain(
+      "SEARCH events USING INDEX events_thread_type_item_kind_sequence_idx (thread_id=? AND type=? AND item_kind=?)",
+    );
 
     db.$client.close();
   });
