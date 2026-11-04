@@ -483,7 +483,9 @@ function buildThreadActivityStateByThreadId(
 ): Map<string, ThreadActivityState> {
   const backgroundTaskActivityByThreadId = new Map(
     listActiveBackgroundTaskCountsByThreadIds(deps.db, {
-      threadIds: threads.map((thread) => thread.id),
+      threadIds: threads
+        .filter((thread) => thread.archivedAt === null)
+        .map((thread) => thread.id),
     }).map((activity) => [activity.threadId, activity]),
   );
   const promptBannerActivityByThreadId =

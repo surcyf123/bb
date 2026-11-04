@@ -1570,7 +1570,7 @@ interface OpenTurnInputCacheEntry {
   rows: StoredEventRow[];
 }
 
-const OPEN_TURN_INPUT_CACHE_MAX_ENTRIES = 4096;
+const OPEN_TURN_INPUT_CACHE_MAX_ENTRIES = 65_536;
 const openTurnInputCaches = new WeakMap<
   DbQueryConnection,
   Map<string, OpenTurnInputCacheEntry>
@@ -2552,7 +2552,7 @@ interface ActiveBackgroundTaskCountCacheEntry {
   row: ActiveBackgroundTaskCountRow | null;
 }
 
-const ACTIVE_BACKGROUND_TASK_COUNT_CACHE_MAX_ENTRIES = 4096;
+const ACTIVE_BACKGROUND_TASK_COUNT_CACHE_MAX_ENTRIES = 65_536;
 const activeBackgroundTaskCountCaches = new WeakMap<
   DbQueryConnection,
   Map<string, ActiveBackgroundTaskCountCacheEntry>
@@ -4072,15 +4072,21 @@ export function isStoredTurnMainRunIdle(
     .select({
       idle: sql<number>`json_extract(${events.data}, '$.state') = 'idle'`,
     })
-    .from(events)
+    .from(sql`${events} INDEXED BY events_thread_type_sequence_idx`)
     .where(
       and(
         eq(events.threadId, args.threadId),
-        eq(events.turnId, args.turnId),
         eq(events.type, "turn/mainRun/updated"),
+        eq(events.turnId, args.turnId),
+        sql`${events.sequence} >= COALESCE((
+          SELECT MIN(turn_start.sequence) FROM events AS turn_start
+          WHERE turn_start.thread_id = ${args.threadId}
+            AND turn_start.turn_id = ${args.turnId}
+            AND turn_start.type = 'turn/started'
+        ), 0)`,
       ),
     )
-    .orderBy(desc(events.sequence))
+    .orderBy(sql`${events.sequence} DESC`)
     .limit(1)
     .get();
   return latest?.idle === 1;
