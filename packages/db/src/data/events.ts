@@ -4079,7 +4079,7 @@ export function isStoredTurnMainRunIdle(
         eq(events.type, "turn/mainRun/updated"),
         eq(events.turnId, args.turnId),
         sql`${events.sequence} >= COALESCE((
-          SELECT MIN(turn_start.sequence) FROM events AS turn_start
+          SELECT MIN(turn_start.sequence) FROM events AS turn_start INDEXED BY events_thread_turn_type_item_sequence_idx
           WHERE turn_start.thread_id = ${args.threadId}
             AND turn_start.turn_id = ${args.turnId}
             AND turn_start.type = 'turn/started'
