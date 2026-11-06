@@ -49,6 +49,7 @@ import {
   listStoredEventRowsByParentToolCallIds,
   listStoredTurnCompletedKeys,
   listTodoSnapshotEventRowsForThread,
+  getStoredTurnRequestEventForTurnUncached,
 } from "../src/data/events.js";
 import {
   MAX_COMPLETED_EVENT_OUTPUT_MIGRATION_EVENT_DATA_BYTES,
@@ -267,6 +268,26 @@ function expectNoThreadOnlyEventSeek(details: string): void {
 }
 
 describe("slow query index plans", () => {
+  it("seeks a turn's accepted input through the turn index", () => {
+    const { db, thread } = setup();
+    try {
+      const captured = captureStatements(db, () => {
+        expect(
+          getStoredTurnRequestEventForTurnUncached(db, {
+            threadId: thread.id,
+            turnId: "turn_without_accepted_input",
+          }),
+        ).toBeNull();
+      });
+      expect(captured).toHaveLength(1);
+      expect(queryPlanDetails({ db, ...captured[0]! })).toContain(
+        "USING INDEX events_thread_turn_type_item_sequence_idx (thread_id=? AND turn_id=? AND type=?)",
+      );
+    } finally {
+      db.$client.close();
+    }
+  });
+
   it("checks spawn-agent history without reading unrelated event payloads", () => {
     const { db, thread } = setup();
     try {

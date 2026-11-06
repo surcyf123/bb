@@ -2170,7 +2170,9 @@ export function getStoredTurnRequestEventForTurnUncached(
           string | null
         >`json_extract(${events.data}, '$.clientRequestId')`,
       })
-      .from(events)
+      .from(
+        sql`${events} INDEXED BY events_thread_turn_type_item_sequence_idx`,
+      )
       .where(
         and(
           eq(events.threadId, args.threadId),
