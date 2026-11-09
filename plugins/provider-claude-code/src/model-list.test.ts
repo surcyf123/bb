@@ -70,6 +70,7 @@ describe("buildClaudeCodeModels", () => {
         isDefault: true,
       },
       { model: "claude-fable-5-1", displayName: "Fable 5.1", isDefault: false },
+      { model: "claude-fable-5-2", displayName: "Fable 5.2", isDefault: false },
       { model: "claude-sonnet-5", displayName: "Sonnet 5", isDefault: false },
       {
         model: "claude-haiku-4-5-20251001",
@@ -146,5 +147,35 @@ describe("buildClaudeCodeModels", () => {
     expect(result.models.find((model) => model.isDefault)?.model).toBe(
       "claude-sonnet-5",
     );
+  });
+
+  it("offers the Fable successor next to the Fable the CLI reports", () => {
+    const fable = (value: string) => ({
+      value,
+      displayName: "Fable",
+      description: "Most capable",
+      supportedEffortLevels: ["low", "medium", "high", "xhigh", "max"] as (
+        | "low"
+        | "medium"
+        | "high"
+        | "xhigh"
+        | "max"
+      )[],
+    });
+    const added = buildClaudeCodeModels([fable("claude-fable-5-1")]).models;
+    expect(added.map((model) => [model.model, model.displayName])).toEqual([
+      ["claude-fable-5-1", "Fable 5.1"],
+      ["claude-fable-5-2", "Fable 5.2"],
+    ]);
+    expect(added[1]?.supportedReasoningEfforts).toEqual(
+      added[0]?.supportedReasoningEfforts,
+    );
+    expect(added.filter((model) => model.isDefault).map((model) => model.model)).toEqual(["claude-fable-5-1"]);
+    expect(
+      buildClaudeCodeModels([
+        fable("claude-fable-5-2"),
+        fable("claude-fable-5-1"),
+      ]).models.map((model) => model.model),
+    ).toEqual(["claude-fable-5-2", "claude-fable-5-1"]);
   });
 });
