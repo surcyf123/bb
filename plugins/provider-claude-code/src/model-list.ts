@@ -13,6 +13,11 @@ import type { ModelInfo } from "@anthropic-ai/claude-agent-sdk";
 const CLAUDE_MODEL_ID_PATTERN =
   /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(\[1m\])?$/;
 
+const SUCCESSOR_MODELS: readonly (readonly [string, string])[] = [
+  ["claude-fable-5-1", "claude-fable-5-2"],
+  ["claude-mythos-5-1", "claude-mythos-5-2"],
+];
+
 function deriveClaudeModelDisplayName(model: string): string | null {
   const match = CLAUDE_MODEL_ID_PATTERN.exec(model);
   if (!match) {
@@ -98,6 +103,23 @@ export function buildClaudeCodeModels(
         deriveClaudeModelDisplayName(model) ?? modelInfo.displayName,
       ),
     );
+  }
+  for (const [released, successor] of SUCCESSOR_MODELS) {
+    const index = models.findIndex((candidate) => candidate.model === released);
+    const source = models[index];
+    if (
+      source === undefined ||
+      models.some((candidate) => candidate.model === successor)
+    ) {
+      continue;
+    }
+    models.splice(index + 1, 0, {
+      ...source,
+      id: successor,
+      model: successor,
+      displayName: deriveClaudeModelDisplayName(successor) ?? successor,
+      isDefault: false,
+    });
   }
   const selectedOnlyModels: AvailableModel[] = [];
   for (const modelInfo of discoveredModels) {
