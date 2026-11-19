@@ -1,7 +1,11 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { z } from "zod";
 import type { Thread } from "@bb/domain";
-import { createConnection, syncThreadEventRewriteGeneration } from "@bb/db";
+import {
+  createConnection,
+  pinDatabaseDataVersion,
+  syncThreadEventRewriteGeneration,
+} from "@bb/db";
 import type {
   OffThreadOutlineOptions,
   OffThreadTimelineOptions,
@@ -63,6 +67,7 @@ const { databasePath } = z
 const port = parentPort;
 if (port === null) throw new Error("Off-thread read worker requires a parent");
 
+pinDatabaseDataVersion();
 const db = createConnection(databasePath);
 const seenHistory = new Map<string, { compactions: number; rewrites: number }>();
 

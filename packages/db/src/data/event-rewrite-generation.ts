@@ -32,7 +32,14 @@ export function forgetThreadEventRewriteGenerations(): void {
   generationsByThreadId.clear();
 }
 
+let dataVersionPinned = false;
+
+export function pinDatabaseDataVersion(): void {
+  dataVersionPinned = true;
+}
+
 export function getDatabaseDataVersion(db: DbConnection): number {
+  if (dataVersionPinned) return 0;
   const version: unknown = db.$client.pragma("data_version", { simple: true });
   if (typeof version !== "number") {
     throw new Error("PRAGMA data_version did not return a number");
