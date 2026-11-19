@@ -10,14 +10,21 @@ import type {
   OffThreadOutlineOptions,
   OffThreadTimelineOptions,
 } from "./off-thread-reads.js";
+import { setConversationOutlineCacheLimits } from "./conversation-outline-cache.js";
 import {
   buildThreadTimelineWithProfile,
   loadThreadConversationOutline,
 } from "./timeline.js";
 import { forgetTimelineGroupingContexts } from "./timeline-context-order.js";
 import { shortenTimelineResponseOutputs } from "./timeline-output-shortening.js";
-import { forgetTimelineProjectionFolds } from "./timeline-projection-fold.js";
-import { forgetLatestTimelineSelections } from "./timeline-selection-memo.js";
+import {
+  forgetTimelineProjectionFolds,
+  setTimelineProjectionFoldLimit,
+} from "./timeline-projection-fold.js";
+import {
+  forgetLatestTimelineSelections,
+  setTimelineSelectionMemoLimits,
+} from "./timeline-selection-memo.js";
 
 const historySchema = z.object({
   compactions: z.number().int().nonnegative(),
@@ -67,7 +74,23 @@ const { databasePath } = z
 const port = parentPort;
 if (port === null) throw new Error("Off-thread read worker requires a parent");
 
+const WORKER_OUTLINE_CACHE_MAX_CHARS = 512_000_000;
+const WORKER_OUTLINE_CACHE_MAX_ENTRIES = 32;
+const WORKER_TIMELINE_MEMO_MAX_DATA_CHARS = 400_000_000;
+const WORKER_TIMELINE_MEMO_MAX_ENTRIES = 64;
+const WORKER_TIMELINE_MEMO_MAX_IDLE_ENTRIES = 32;
+
 pinDatabaseDataVersion();
+setConversationOutlineCacheLimits({
+  maxChars: WORKER_OUTLINE_CACHE_MAX_CHARS,
+  maxEntries: WORKER_OUTLINE_CACHE_MAX_ENTRIES,
+});
+setTimelineSelectionMemoLimits({
+  maxDataChars: WORKER_TIMELINE_MEMO_MAX_DATA_CHARS,
+  maxEntries: WORKER_TIMELINE_MEMO_MAX_ENTRIES,
+  maxIdleEntries: WORKER_TIMELINE_MEMO_MAX_IDLE_ENTRIES,
+});
+setTimelineProjectionFoldLimit(WORKER_TIMELINE_MEMO_MAX_ENTRIES);
 const db = createConnection(databasePath);
 const seenHistory = new Map<string, { compactions: number; rewrites: number }>();
 

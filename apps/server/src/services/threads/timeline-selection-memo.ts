@@ -149,6 +149,21 @@ export const TIMELINE_SELECTION_MEMO_MAX_ENTRIES = 16;
 export const TIMELINE_SELECTION_MEMO_MAX_IDLE_ENTRIES = 4;
 export const TIMELINE_SELECTION_MEMO_MAX_DATA_CHARS = 16_000_000;
 const TIMELINE_SELECTION_MEMO_MAX_APPENDED_ROWS = 512;
+const selectionMemoLimits = {
+  maxDataChars: TIMELINE_SELECTION_MEMO_MAX_DATA_CHARS,
+  maxEntries: TIMELINE_SELECTION_MEMO_MAX_ENTRIES,
+  maxIdleEntries: TIMELINE_SELECTION_MEMO_MAX_IDLE_ENTRIES,
+};
+
+export function setTimelineSelectionMemoLimits(limits: {
+  maxDataChars: number;
+  maxEntries: number;
+  maxIdleEntries: number;
+}): void {
+  selectionMemoLimits.maxDataChars = limits.maxDataChars;
+  selectionMemoLimits.maxEntries = limits.maxEntries;
+  selectionMemoLimits.maxIdleEntries = limits.maxIdleEntries;
+}
 
 const SELECTION_CHANGING_EVENT_TYPES: ReadonlySet<ThreadEventType> = new Set([
   "client/turn/rejected",
@@ -302,7 +317,7 @@ function deleteOldestIdleEntries(memo: TimelineSelectionMemo): void {
     if (!entry.active) idleEntries += 1;
   }
   for (const [key, entry] of memo.entries) {
-    if (idleEntries <= TIMELINE_SELECTION_MEMO_MAX_IDLE_ENTRIES) return;
+    if (idleEntries <= selectionMemoLimits.maxIdleEntries) return;
     if (entry.active) continue;
     deleteMemoEntry(memo, key);
     idleEntries -= 1;
@@ -315,9 +330,9 @@ function storeMemoEntry(
   entry: TimelineSelectionMemoEntry,
 ): void {
   deleteMemoEntry(memo, key);
-  if (entry.dataChars > TIMELINE_SELECTION_MEMO_MAX_DATA_CHARS) return;
+  if (entry.dataChars > selectionMemoLimits.maxDataChars) return;
   const stored =
-    retainedSizeOf(entry) > TIMELINE_SELECTION_MEMO_MAX_DATA_CHARS
+    retainedSizeOf(entry) > selectionMemoLimits.maxDataChars
       ? { ...entry, keptPageableRowBytes: 0, keptPageableRows: new Map() }
       : entry;
   memo.entries.set(key, stored);
@@ -332,8 +347,8 @@ function storeMemoEntry(
 
 function deleteOldestEntriesOverBudget(memo: TimelineSelectionMemo): void {
   while (
-    memo.entries.size > TIMELINE_SELECTION_MEMO_MAX_ENTRIES ||
-    memo.retainedSize > TIMELINE_SELECTION_MEMO_MAX_DATA_CHARS
+    memo.entries.size > selectionMemoLimits.maxEntries ||
+    memo.retainedSize > selectionMemoLimits.maxDataChars
   ) {
     const oldest = memo.entries.keys().next().value;
     if (oldest === undefined) break;
@@ -1157,7 +1172,7 @@ export function keepLatestTimelinePageableRows(
   memo.retainedSize -= previousBytes;
   if (
     measuredRows.length === 0 ||
-    retainedSizeOf(entry) + bytes > TIMELINE_SELECTION_MEMO_MAX_DATA_CHARS
+    retainedSizeOf(entry) + bytes > selectionMemoLimits.maxDataChars
   ) {
     entry.keptPageableRows.delete(variant);
   } else {

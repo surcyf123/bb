@@ -1983,15 +1983,12 @@ function listOpenTurnInputAcceptedRowsByThreadIdsUncached(
           and(
             eq(events.type, acceptedType),
             isNotNull(events.turnId),
-            args.afterSequence === null
-              ? undefined
-              : sql`${events.sequence} > ${args.afterSequence}`,
-            sql`${events.sequence} > COALESCE((
+            sql`${events.sequence} > MAX(${args.afterSequence ?? -1}, COALESCE((
           SELECT MAX(interrupted.sequence)
           FROM events interrupted
           WHERE interrupted.thread_id = requested.column1
             AND interrupted.type = ${interruptedType}
-        ), -1)`,
+        ), -1))`,
             notExists(
               db
                 .select({ one: sql`1` })

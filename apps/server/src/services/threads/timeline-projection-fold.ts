@@ -26,7 +26,11 @@ export interface TimelineProjectionFoldArgs {
   threadId: string;
 }
 
-const TIMELINE_PROJECTION_FOLD_MAX_ENTRIES = 16;
+let TIMELINE_PROJECTION_FOLD_MAX_ENTRIES = 16;
+
+export function setTimelineProjectionFoldLimit(maxEntries: number): void {
+  TIMELINE_PROJECTION_FOLD_MAX_ENTRIES = maxEntries;
+}
 
 const keptFolds = new WeakMap<
   DbConnection,

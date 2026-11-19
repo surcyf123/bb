@@ -55,8 +55,16 @@ interface OutlineCache {
 }
 
 const caches = new WeakMap<DbConnection, OutlineCache>();
-const MAX_ENTRIES = 16;
-const MAX_CHARS = 8_000_000;
+let MAX_ENTRIES = 16;
+let MAX_CHARS = 8_000_000;
+
+export function setConversationOutlineCacheLimits(limits: {
+  maxChars: number;
+  maxEntries: number;
+}): void {
+  MAX_CHARS = limits.maxChars;
+  MAX_ENTRIES = limits.maxEntries;
+}
 
 function referencedRequestId(
   event: ThreadEventWithMeta["event"],
