@@ -16,7 +16,6 @@ import {
   restoreDiffViewedFilesTable,
   dropQueuedMessageEditHeldUntilColumn,
   rewindQueuedMessageStateMigration,
-  QUEUED_MESSAGE_STATE_MIGRATION_WHEN,
 } from "./helpers/rewind.js";
 import { defaultAppSettings } from "@bb/domain";
 import {
@@ -3991,54 +3990,33 @@ describe("migrate", () => {
 
   it("applies upstream migrations that sort before a newer local migration row", () => {
     const db = createConnection(":memory:");
-    const localMigrationWhen = 1792059867452;
+    const deliveryModeMigrationWhen = 1793309187609;
+    const coalescedNoticesMigrationWhen = 1793380935401;
+    const localMigrationWhen = 1793496495398;
+    const requestIndexMigrationWhen = 1795116000000;
 
     try {
       migrate(db);
-      const host = upsertHost(db, noopNotifier, {
-        id: "host-local-ledger",
-        name: "Migration Host",
-      });
-      const { project } = createProject(db, noopNotifier, {
-        name: "Migration Project",
-        source: {
-          type: "local_path",
-          hostId: host.id,
-          path: "/tmp/local-ledger",
-        },
-      });
-      const thread = createThread(db, noopNotifier, {
-        projectId: project.id,
-        providerId: "codex",
-      });
-      const queued = createQueuedThreadMessage(db, noopNotifier, {
-        threadId: thread.id,
-        content: [{ type: "text", text: "queued before upgrade", mentions: [] }],
-        model: "gpt-5",
-        permissionMode: "full",
-        reasoningLevel: "medium",
-        serviceTier: "default",
-        waitingOn: null,
-        sendAt: null,
-        payload: { kind: "inline" },
-        systemNotice: null,
-      });
-      rewindQueuedMessageStateMigration(db);
-      dropThreadParentNotificationsColumn(db);
       db.$client.exec(`
-        ALTER TABLE queued_thread_messages ADD bb_local_originally_scheduled_at integer;
-        CREATE TABLE bb_local_child_notification_outbox (
-          source_key text PRIMARY KEY NOT NULL,
-          data text NOT NULL
-        );
-        INSERT INTO bb_local_child_notification_outbox (source_key, data)
-          VALUES ('local-source', '{}');
+        DROP INDEX queued_thread_messages_coalesce_idx;
+        ALTER TABLE queued_thread_messages DROP COLUMN coalesce_state;
+        ALTER TABLE queued_thread_messages DROP COLUMN coalesce_key;
+        ALTER TABLE queued_thread_messages DROP COLUMN delivery_mode;
       `);
+      db.$client
+        .prepare<[number, number, number]>(
+          "DELETE FROM __drizzle_migrations WHERE created_at IN (?, ?, ?)",
+        )
+        .run(
+          deliveryModeMigrationWhen,
+          coalescedNoticesMigrationWhen,
+          requestIndexMigrationWhen,
+        );
       db.$client
         .prepare<InsertMigrationParameters>(
           "INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)",
         )
-        .run("bb-local-child-notification-outbox", localMigrationWhen);
+        .run("bb-local-client-turn-request-id-index", localMigrationWhen);
 
       expect(() => migrate(db)).not.toThrow();
 
@@ -4048,26 +4026,17 @@ describe("migrate", () => {
         )
         .all()
         .map((row) => row.createdAt);
-      expect(appliedCreatedAts).toContain(QUEUED_MESSAGE_STATE_MIGRATION_WHEN);
+      expect(appliedCreatedAts).toContain(deliveryModeMigrationWhen);
+      expect(appliedCreatedAts).toContain(coalescedNoticesMigrationWhen);
       expect(appliedCreatedAts).toContain(localMigrationWhen);
-      expect(
-        db.$client
-          .prepare<[string], { state: string }>(
-            "SELECT state FROM queued_thread_messages WHERE id = ?",
-          )
-          .get(queued.id),
-      ).toEqual({ state: "queued" });
-      expect(
-        db.$client
-          .prepare<[], TableInfoRow>("PRAGMA table_info(threads)")
-          .all()
-          .some((column) => column.name === "parent_notifications"),
-      ).toBe(true);
-      expect(
-        db.$client
-          .prepare("SELECT source_key FROM bb_local_child_notification_outbox")
-          .all(),
-      ).toEqual([{ source_key: "local-source" }]);
+      expect(appliedCreatedAts).toContain(requestIndexMigrationWhen);
+      const queuedColumns = db.$client
+        .prepare<[], TableInfoRow>("PRAGMA table_info(queued_thread_messages)")
+        .all()
+        .map((column) => column.name);
+      expect(queuedColumns).toContain("delivery_mode");
+      expect(queuedColumns).toContain("coalesce_key");
+      expect(queuedColumns).toContain("coalesce_state");
     } finally {
       closeConnection(db);
     }
