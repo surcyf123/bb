@@ -76,6 +76,7 @@ import {
   getLatestCompletedThreadContextClearSequence,
   getThreadConversationOutlineRecord,
   getThreadEventRewriteGeneration,
+  getThreadEventStructuralGeneration,
   isTimelineCursorSequencePresent,
   listStoredConversationOutlineEventRows,
   listStoredRootConversationOutlineEventRows,
@@ -2234,10 +2235,11 @@ export function buildThreadConversationOutlineProjectionKey(
   thread: Thread,
   outlineSequence: number,
   options: BuildThreadConversationOutlineOptions,
+  generation = getThreadEventRewriteGeneration(thread.id),
 ): string {
   return JSON.stringify([
     CONVERSATION_OUTLINE_PROJECTION_VERSION,
-    getThreadEventRewriteGeneration(thread.id),
+    generation,
     outlineSequence,
     thread.providerId,
     options.providerDisplayName ?? null,
@@ -2301,7 +2303,12 @@ export function loadThreadConversationOutline(
         items: projectConversationOutlineIncrementally({
           db,
           threadId: thread.id,
-          key: buildThreadConversationOutlineProjectionKey(thread, 0, options),
+          key: buildThreadConversationOutlineProjectionKey(
+            thread,
+            0,
+            options,
+            getThreadEventStructuralGeneration(thread.id),
+          ),
           maxSeq: options.maxSeq,
           historySequenceStart,
           orderingBoundarySequence,

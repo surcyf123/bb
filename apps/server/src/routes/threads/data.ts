@@ -11,6 +11,7 @@ import {
   getLatestThreadSequence,
   getLatestStoredConversationOutlineSequence,
   getThreadEventRewriteGeneration,
+  getThreadEventStructuralGeneration,
   listQueuedThreadMessages,
 } from "@bb/db";
 import type { Hono } from "hono";
@@ -287,6 +288,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
               history: offThreadHistoryState(
                 thread.id,
                 getThreadEventRewriteGeneration(thread.id),
+                getThreadEventStructuralGeneration(thread.id),
               ),
               options: { ...outlineOptions, outlineSequence },
               thread,

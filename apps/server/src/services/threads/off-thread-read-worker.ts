@@ -30,6 +30,7 @@ const historySchema = z.object({
   compactions: z.number().int().nonnegative(),
   rewriteGeneration: z.number().int().nonnegative(),
   rewrites: z.number().int().nonnegative(),
+  structuralGeneration: z.number().int().nonnegative(),
 });
 const threadSchema = z.custom<Thread>(
   (value) =>
@@ -96,7 +97,8 @@ const seenHistory = new Map<string, { compactions: number; rewrites: number }>()
 
 function syncHistory(request: ReadRequest): void {
   const threadId = request.thread.id;
-  const { compactions, rewriteGeneration, rewrites } = request.history;
+  const { compactions, rewriteGeneration, rewrites, structuralGeneration } =
+    request.history;
   const seen = seenHistory.get(threadId);
   if (seen !== undefined && seen.rewrites !== rewrites) {
     forgetTimelineGroupingContexts(db, threadId);
@@ -109,7 +111,11 @@ function syncHistory(request: ReadRequest): void {
     forgetTimelineProjectionFolds(db, threadId);
   }
   seenHistory.set(threadId, { compactions, rewrites });
-  syncThreadEventRewriteGeneration(threadId, rewriteGeneration);
+  syncThreadEventRewriteGeneration(
+    threadId,
+    rewriteGeneration,
+    structuralGeneration,
+  );
 }
 
 function buildTimeline(request: Extract<ReadRequest, { kind: "timeline" }>) {

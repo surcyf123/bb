@@ -34,6 +34,7 @@ export interface OffThreadHistoryState {
   compactions: number;
   rewriteGeneration: number;
   rewrites: number;
+  structuralGeneration: number;
 }
 
 export type OffThreadReadRequest =
@@ -99,12 +100,14 @@ export function forgetOffThreadHistory(threadId: string): void {
 export function offThreadHistoryState(
   threadId: string,
   rewriteGeneration: number,
+  structuralGeneration: number,
 ): OffThreadHistoryState {
   const counts = historyCountsByThreadId.get(threadId);
   return {
     compactions: counts?.compactions ?? 0,
     rewriteGeneration,
     rewrites: counts?.rewrites ?? 0,
+    structuralGeneration,
   };
 }
 

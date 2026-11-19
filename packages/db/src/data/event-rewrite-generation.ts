@@ -36,8 +36,10 @@ export function bumpThreadEventRewriteGeneration(
 export function syncThreadEventRewriteGeneration(
   threadId: string,
   generation: number,
+  structuralGeneration: number,
 ): void {
   generationsByThreadId.set(threadId, generation);
+  structuralGenerationsByThreadId.set(threadId, structuralGeneration);
 }
 
 export function forgetThreadEventRewriteGenerations(): void {

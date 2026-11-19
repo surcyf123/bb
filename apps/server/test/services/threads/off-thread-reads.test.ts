@@ -10,6 +10,7 @@ import {
   getLatestThreadSequence,
   getThread,
   getThreadEventRewriteGeneration,
+  getThreadEventStructuralGeneration,
   insertEvents,
   migrate,
   noopNotifier,
@@ -141,6 +142,7 @@ describe("off-thread reads", { timeout: 60_000 }, () => {
           history: offThreadHistoryState(
             thread().id,
             getThreadEventRewriteGeneration(thread().id),
+            getThreadEventStructuralGeneration(thread().id),
           ),
           options,
           thread: thread(),

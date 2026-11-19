@@ -4,6 +4,7 @@ import {
   type CompletedTurnDisplay,
 } from "@bb/domain";
 import {
+  bumpThreadEventRewriteGeneration,
   deleteThreadEventSuffixInTransaction,
   createThread,
   noopNotifier,
@@ -259,6 +260,41 @@ function countSelectedEventRows(
 }
 
 describe("incremental conversation outlines", () => {
+  it("keeps completed history across pruned deltas and matches a full build", () => {
+    withTestThread((testThread) => {
+      appendRows(
+        testThread,
+        Array.from({ length: 40 }, (_, index) => [
+          started(`pruned-${index}`),
+          delta(`pruned-${index}`, "Partial"),
+          delta(`pruned-${index}`, " answer"),
+          message(`pruned-${index}`, `Answer ${index}`),
+          completed(`pruned-${index}`),
+        ]).flat(),
+      );
+      appendRows(testThread, [started("live"), delta("live", "Live")]);
+      expectMatchesFull(testThread);
+      const removed = testThread.db.$client
+        .prepare(
+          "DELETE FROM events WHERE thread_id = ? AND type = 'item/agentMessage/delta' AND turn_id LIKE 'pruned-%'",
+        )
+        .run(testThread.thread.id).changes;
+      expect(removed).toBe(80);
+      bumpThreadEventRewriteGeneration(
+        testThread.db,
+        testThread.thread.id,
+        "prune",
+      );
+      appendRows(testThread, [delta("live", " continued")]);
+      const selected = countSelectedEventRows(testThread, () =>
+        expectMatchesFull(testThread),
+      );
+      expect(selected).toBeLessThan(25);
+      appendRows(testThread, [message("live", "Finished"), completed("live")]);
+      expectMatchesFull(testThread);
+    });
+  });
+
   it.each(["collapse", "flat"] as const)(
     "retains completed nested history while updating the live tail (%s)",
     (display) => {

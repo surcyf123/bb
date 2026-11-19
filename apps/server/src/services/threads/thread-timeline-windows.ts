@@ -4,6 +4,7 @@ import {
   getLatestThreadSequence,
   getThread,
   getThreadEventRewriteGeneration,
+  getThreadEventStructuralGeneration,
 } from "@bb/db";
 import {
   DEFAULT_COMPLETED_TURN_DISPLAY,
@@ -209,7 +210,11 @@ export function createThreadTimelineWindows(
     const offThread = await buildThreadTimelineOffThread(
       offThreadTarget,
       {
-        history: offThreadHistoryState(thread.id, prepared.rewriteGeneration),
+        history: offThreadHistoryState(
+          thread.id,
+          prepared.rewriteGeneration,
+          getThreadEventStructuralGeneration(thread.id),
+        ),
         options: prepared.buildOptions,
         thread,
       },

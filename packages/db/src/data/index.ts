@@ -5,6 +5,7 @@ export {
   bumpThreadEventRewriteGeneration,
   getDatabaseDataVersion,
   getThreadEventRewriteGeneration,
+  getThreadEventStructuralGeneration,
   pinDatabaseDataVersion,
   syncThreadEventRewriteGeneration,
 } from "./event-rewrite-generation.js";

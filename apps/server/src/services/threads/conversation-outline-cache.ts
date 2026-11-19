@@ -1,6 +1,6 @@
 import {
   getDatabaseDataVersion,
-  getThreadEventRewriteGeneration,
+  getThreadEventStructuralGeneration,
   type DbConnection,
 } from "@bb/db";
 import type { ThreadConversationOutlineItem } from "@bb/server-contract";
@@ -252,7 +252,7 @@ export function projectConversationOutlineIncrementally(args: {
     caches.set(args.db, cache);
   }
   const dataVersion = getDatabaseDataVersion(args.db);
-  const generation = getThreadEventRewriteGeneration(args.threadId);
+  const generation = getThreadEventStructuralGeneration(args.threadId);
   const entry = cache.entries.get(args.threadId);
   if (entry !== undefined) {
     cache.entries.delete(args.threadId);
