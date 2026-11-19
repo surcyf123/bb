@@ -243,7 +243,7 @@ interface ThreadTimelineSurface {
   workspaceRoot: string | null;
 }
 
-interface BuildThreadTimelineOptions extends ThreadTimelineSurfaceOptions {
+export interface BuildThreadTimelineOptions extends ThreadTimelineSurfaceOptions {
   eventBudget: number;
   responseByteBudget?: number;
   maxSeq: number;

@@ -23,6 +23,7 @@ export interface ThreadDerivedCacheRead<T> {
 
 export interface ThreadDerivedCache<T> {
   getOrBuild(read: ThreadDerivedCacheRead<T>): T;
+  has(slot: string, revision: string): boolean;
   invalidateThread(threadId: string): void;
   readonly size: number;
 }
@@ -87,6 +88,14 @@ export function createThreadDerivedCache<T>(
         }
       }
       return value;
+    },
+    has(slot, revision) {
+      const cached = entries.get(slot);
+      return (
+        cached !== undefined &&
+        cached.revision === revision &&
+        (cached.expiresAt === null || Date.now() < cached.expiresAt)
+      );
     },
     invalidateThread(threadId) {
       for (const [slot, entry] of entries) {

@@ -1,10 +1,16 @@
 import {
+  loadConversationOutlineOffThread,
+  offThreadHistoryState,
+  resolveOffThreadReadTarget,
+} from "../../services/threads/off-thread-reads.js";
+import {
   getAppSettings,
   getDatabaseDataVersion,
   getThreadPluginMetadata,
   patchThreadPluginMetadata,
   getLatestThreadSequence,
   getLatestStoredConversationOutlineSequence,
+  getThreadEventRewriteGeneration,
   listQueuedThreadMessages,
 } from "@bb/db";
 import type { Hono } from "hono";
@@ -150,7 +156,8 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     onValidationError: (msg) => new ApiError(400, "invalid_request", msg),
   });
   const routes = publicApiRoutes.threads;
-  const timelineWindows = createThreadTimelineWindows(deps);
+  const offThreadTarget = resolveOffThreadReadTarget(deps);
+  const timelineWindows = createThreadTimelineWindows(deps, offThreadTarget);
   const conversationOutlineCache = createThreadDerivedCache<
     ThreadConversationOutlineResponse["items"]
   >({ maxEntries: 128, bytes: null });
@@ -234,10 +241,10 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     );
   });
 
-  get(routes.timeline, (context, query) => {
+  get(routes.timeline, async (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
     return context.json(
-      timelineWindows.read(
+      await timelineWindows.readOffThread(
         thread,
         {
           deferContent: query.deferContent === "true",
@@ -249,7 +256,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     );
   });
 
-  get(routes.conversationOutline, (context, query) => {
+  get(routes.conversationOutline, async (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
     const selectItems = (items: ThreadConversationOutlineResponse["items"]) =>
       query.role === undefined
@@ -262,23 +269,42 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     );
     const outlineOptions = resolveConversationRowsOptions(thread);
     const { maxSeq } = outlineOptions;
+    const revision = JSON.stringify([
+      getDatabaseDataVersion(deps.db),
+      buildThreadConversationOutlineProjectionKey(
+        thread,
+        outlineSequence,
+        outlineOptions,
+      ),
+    ]);
+    const offThreadItems =
+      offThreadTarget === null ||
+      conversationOutlineCache.has(thread.id, revision)
+        ? null
+        : await loadConversationOutlineOffThread(
+            offThreadTarget,
+            {
+              history: offThreadHistoryState(
+                thread.id,
+                getThreadEventRewriteGeneration(thread.id),
+              ),
+              options: { ...outlineOptions, outlineSequence },
+              thread,
+            },
+            `${thread.id}\0${revision}`,
+          );
     const items = conversationOutlineCache.getOrBuild({
       slot: thread.id,
       threadId: thread.id,
-      revision: JSON.stringify([
-        getDatabaseDataVersion(deps.db),
-        buildThreadConversationOutlineProjectionKey(
-          thread,
-          outlineSequence,
-          outlineOptions,
-        ),
-      ]),
+      revision,
       build: () => ({
         expiresAt: null,
-        value: loadThreadConversationOutline(deps.db, thread, {
-          ...outlineOptions,
-          outlineSequence,
-        }).items,
+        value:
+          offThreadItems ??
+          loadThreadConversationOutline(deps.db, thread, {
+            ...outlineOptions,
+            outlineSequence,
+          }).items,
       }),
     });
     return context.json({ items: selectItems(items), maxSeq });

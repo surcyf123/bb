@@ -21,6 +21,13 @@ export function bumpThreadEventRewriteGeneration(
   );
 }
 
+export function syncThreadEventRewriteGeneration(
+  threadId: string,
+  generation: number,
+): void {
+  generationsByThreadId.set(threadId, generation);
+}
+
 export function forgetThreadEventRewriteGenerations(): void {
   generationsByThreadId.clear();
 }
