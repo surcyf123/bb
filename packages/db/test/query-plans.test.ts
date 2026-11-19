@@ -970,13 +970,20 @@ describe("slow query index plans", () => {
       listOpenBackgroundTaskItemRowsForHost(db, { hostId: host.id });
     });
     expect(captured).toHaveLength(2);
-    for (const query of captured) {
-      const details = queryPlanDetails({ db, ...query });
-      expect(details).toMatch(
-        /SEARCH \w+ USING COVERING INDEX events_background_task_thread_type_item_sequence_idx \(thread_id=\? AND type=\? AND item_id=\?\)/u,
-      );
-      expectNoThreadOnlyEventSeek(details);
-    }
+    const [threadQuery, hostQuery] = captured.map((query) =>
+      queryPlanDetails({ db, ...query }),
+    );
+    expect(threadQuery).toMatch(
+      /SEARCH \w+ USING COVERING INDEX events_background_task_thread_type_item_sequence_idx \(thread_id=\? AND type=\? AND item_id=\?\)/u,
+    );
+    expect(hostQuery).toMatch(
+      /SEARCH \w+ USING COVERING INDEX events_background_task_thread_type_item_sequence_idx \(thread_id=\? AND type=\?/u,
+    );
+    expect(hostQuery).toMatch(
+      /SEARCH \w+ USING INDEX events_thread_sequence_idx \(thread_id=\? AND sequence=\?\)/u,
+    );
+    expectNoThreadOnlyEventSeek(threadQuery);
+    expectNoThreadOnlyEventSeek(hostQuery);
 
     db.$client.close();
   });

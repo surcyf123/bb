@@ -5291,59 +5291,46 @@ export function listOpenBackgroundTaskItemRowsForHost(
   db: DbQueryConnection,
   args: ListOpenBackgroundTaskItemRowsForHostArgs,
 ): OpenBackgroundTaskItemRow[] {
-  const startedType = "item/started" satisfies ThreadEventType;
-  const progressType = "item/backgroundTask/progress" satisfies ThreadEventType;
-  const completedType =
-    "item/backgroundTask/completed" satisfies ThreadEventType;
-  const settled = alias(events, "settled_background_task");
-
-  const rows = db
-    .select({
-      data: events.data,
-      environmentId: threads.environmentId,
-      itemId: events.itemId,
-      providerThreadId: events.providerThreadId,
-      threadId: events.threadId,
-      type: events.type,
-    })
-    .from(events)
-    .innerJoin(threads, eq(events.threadId, threads.id))
-    .innerJoin(environments, eq(threads.environmentId, environments.id))
-    .where(
-      and(
-        eq(environments.hostId, args.hostId),
-        sql`${events.itemKind} = 'backgroundTask'`,
-        inArray(events.type, [startedType, progressType]),
-        isNotNull(events.itemId),
-        notExists(
-          db
-            .select({ one: sql`1` })
-            .from(settled)
-            .where(
-              and(
-                eq(settled.threadId, events.threadId),
-                sql`${settled.itemKind} = 'backgroundTask'`,
-                eq(settled.itemId, events.itemId),
-                eq(settled.type, completedType),
-              ),
-            ),
-        ),
-        sql`${events.sequence} = (
-          SELECT MAX(latest.sequence)
-          FROM events latest
-          WHERE latest.thread_id = ${events.threadId}
-            AND latest.item_kind = 'backgroundTask'
-            AND latest.item_id = ${events.itemId}
-            AND latest.type IN (${startedType}, ${progressType})
-        )`,
-      ),
+  return db.all<OpenBackgroundTaskItemRow>(sql`
+    WITH scoped_threads AS MATERIALIZED (
+      SELECT thread.id, thread.environment_id
+      FROM environments environment
+      JOIN threads thread INDEXED BY threads_environment_idx
+        ON thread.environment_id = environment.id
+      WHERE environment.host_id = ${args.hostId}
+    ),
+    latest_host_background_task AS MATERIALIZED (
+      SELECT event.thread_id, event.item_id,
+        MAX(scoped.environment_id) AS environment_id,
+        MAX(CASE
+          WHEN event.type IN ('item/started', 'item/backgroundTask/progress')
+          THEN event.sequence
+        END) AS sequence,
+        MAX(CASE
+          WHEN event.type = 'item/backgroundTask/completed' THEN 1
+          ELSE 0
+        END) AS is_completed
+      FROM scoped_threads scoped
+      CROSS JOIN events event INDEXED BY events_background_task_thread_type_item_sequence_idx
+      WHERE event.thread_id = scoped.id AND event.item_kind = 'backgroundTask'
+        AND event.type IN ('item/started', 'item/backgroundTask/progress', 'item/backgroundTask/completed')
+        AND event.item_id IS NOT NULL
+      GROUP BY event.thread_id, event.item_id
     )
-    .orderBy(events.threadId, events.sequence)
-    .all();
-
-  return rows.flatMap((row) =>
-    row.itemId === null ? [] : [{ ...row, itemId: row.itemId }],
-  );
+    SELECT
+      event.data,
+      latest.environment_id AS environmentId,
+      event.item_id AS itemId,
+      event.provider_thread_id AS providerThreadId,
+      event.thread_id AS threadId,
+      event.type AS type
+    FROM latest_host_background_task latest
+    JOIN events event INDEXED BY events_thread_sequence_idx
+      ON event.thread_id = latest.thread_id
+        AND event.sequence = latest.sequence
+    WHERE latest.is_completed = 0 AND latest.sequence IS NOT NULL
+    ORDER BY event.thread_id, event.sequence
+  `);
 }
 
 export function listOwnerStoppedBackgroundTaskRowsForHost(
