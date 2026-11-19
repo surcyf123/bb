@@ -3,15 +3,27 @@ import type { DbConnection, DbQueryConnection } from "../connection.js";
 import { threadConversationOutlines } from "../schema.js";
 
 const generationsByThreadId = new Map<string, number>();
+const structuralGenerationsByThreadId = new Map<string, number>();
 
 export function getThreadEventRewriteGeneration(threadId: string): number {
   return generationsByThreadId.get(threadId) ?? 0;
 }
 
+export function getThreadEventStructuralGeneration(threadId: string): number {
+  return structuralGenerationsByThreadId.get(threadId) ?? 0;
+}
+
 export function bumpThreadEventRewriteGeneration(
   db: DbQueryConnection,
   threadId: string,
+  cause: "rewrite" | "prune" = "rewrite",
 ): void {
+  if (cause === "rewrite") {
+    structuralGenerationsByThreadId.set(
+      threadId,
+      getThreadEventStructuralGeneration(threadId) + 1,
+    );
+  }
   db.delete(threadConversationOutlines)
     .where(eq(threadConversationOutlines.threadId, threadId))
     .run();
@@ -30,6 +42,7 @@ export function syncThreadEventRewriteGeneration(
 
 export function forgetThreadEventRewriteGenerations(): void {
   generationsByThreadId.clear();
+  structuralGenerationsByThreadId.clear();
 }
 
 let dataVersionPinned = false;

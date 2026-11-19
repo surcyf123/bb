@@ -370,11 +370,22 @@ describe("slow query index plans", () => {
           threadIds: [thread.id, "missing"],
         });
       });
-      expect(captured).toHaveLength(1);
-      const query = captured[0]!;
-      expect(queryPlanDetails({ db, ...query })).toContain(
+      expect(captured).toHaveLength(2);
+      const [latestSequences, openInputs] = captured.map((query) =>
+        queryPlanDetails({ db, ...query }),
+      );
+      expect(latestSequences).toContain(
+        "events_thread_sequence_idx (thread_id=?)",
+      );
+      expect(openInputs).toContain(
         "events_thread_type_sequence_idx (thread_id=? AND type=? AND sequence>?)",
       );
+      const repeated = captureStatements(db, () => {
+        listOpenTurnInputAcceptedRowsByThreadIds(db, {
+          threadIds: [thread.id, "missing"],
+        });
+      });
+      expect(repeated).toHaveLength(1);
     } finally {
       db.$client.close();
     }

@@ -79,6 +79,7 @@ import {
   bumpThreadEventRewriteGeneration,
   getDatabaseDataVersion,
   getThreadEventRewriteGeneration,
+  getThreadEventStructuralGeneration,
 } from "./event-rewrite-generation.js";
 import { deriveStoredEventItemFieldsFromSource } from "../stored-event-item-fields.js";
 import {
@@ -1954,13 +1955,15 @@ export function listLatestThreadStateEventRowsByThreadIds(
   return read.rows;
 }
 
-export function listOpenTurnInputAcceptedRowsByThreadIds(
+function listOpenTurnInputAcceptedRowsByThreadIdsUncached(
   db: DbQueryConnection,
-  args: ListOpenTurnInputAcceptedRowsByThreadIdsArgs,
+  args: ListOpenTurnInputAcceptedRowsByThreadIdsArgs & {
+    afterSequence: number | null;
+  },
 ): StoredEventRow[] {
   const rows = queryInSqliteVariableBatches({
     dedupeKey: (threadId) => threadId,
-    fixedVariableCount: 3,
+    fixedVariableCount: 4,
     queryBatch: (threadIds) => {
       const acceptedType = "turn/input/accepted" satisfies ThreadEventType;
       const completedType = "turn/completed" satisfies ThreadEventType;
@@ -1980,6 +1983,9 @@ export function listOpenTurnInputAcceptedRowsByThreadIds(
           and(
             eq(events.type, acceptedType),
             isNotNull(events.turnId),
+            args.afterSequence === null
+              ? undefined
+              : sql`${events.sequence} > ${args.afterSequence}`,
             sql`${events.sequence} > COALESCE((
           SELECT MAX(interrupted.sequence)
           FROM events interrupted
@@ -2011,6 +2017,160 @@ export function listOpenTurnInputAcceptedRowsByThreadIds(
       left.threadId.localeCompare(right.threadId) ||
       left.sequence - right.sequence,
   );
+}
+
+interface OpenTurnInputCacheEntry {
+  generation: number;
+  rows: StoredEventRow[];
+  throughSequence: number;
+}
+
+const OPEN_TURN_INPUT_CACHE_MAX_ENTRIES = 65_536;
+const openTurnInputCaches = new WeakMap<
+  DbQueryConnection,
+  Map<string, OpenTurnInputCacheEntry>
+>();
+
+function listLatestThreadSequences(
+  db: DbQueryConnection,
+  threadIds: readonly string[],
+): Map<string, number> {
+  const rows = queryInSqliteVariableBatches({
+    dedupeKey: (threadId) => threadId,
+    fixedVariableCount: 0,
+    queryBatch: (batch) =>
+      db.all<{ threadId: string; latestSequence: number | null }>(sql`
+        SELECT requested.column1 AS threadId, (
+          SELECT MAX(latest.sequence)
+          FROM ${events} AS latest INDEXED BY events_thread_sequence_idx
+          WHERE latest.thread_id = requested.column1
+        ) AS latestSequence
+        FROM (VALUES ${sql.join(
+          batch.map((threadId) => sql`(${threadId})`),
+          sql`, `,
+        )}) AS requested
+      `),
+    values: threadIds,
+    variableCountPerValue: 1,
+  });
+  return new Map(rows.map((row) => [row.threadId, row.latestSequence ?? -1]));
+}
+
+function getLatestThreadInterruptionSequence(
+  db: DbQueryConnection,
+  threadId: string,
+): number {
+  const row = db.get<{ sequence: number | null }>(sql`
+    SELECT MAX(sequence) AS sequence
+    FROM ${events} INDEXED BY events_thread_type_sequence_idx
+    WHERE thread_id = ${threadId} AND type = 'system/thread/interrupted'
+  `);
+  return row?.sequence ?? -1;
+}
+
+function listCompletedTurnIds(
+  db: DbQueryConnection,
+  threadId: string,
+  turnIds: readonly string[],
+): Set<string> {
+  const rows = queryInSqliteVariableBatches({
+    dedupeKey: (turnId) => turnId,
+    fixedVariableCount: 1,
+    queryBatch: (batch) =>
+      db.all<{ turnId: string }>(sql`
+        SELECT DISTINCT turn_id AS turnId
+        FROM ${events} INDEXED BY events_thread_turn_type_item_sequence_idx
+        WHERE thread_id = ${threadId}
+          AND ${inArray(events.turnId, [...batch])}
+          AND type = 'turn/completed'
+      `),
+    values: turnIds,
+    variableCountPerValue: 1,
+  });
+  return new Set(rows.map((row) => row.turnId));
+}
+
+export function listOpenTurnInputAcceptedRowsByThreadIds(
+  db: DbQueryConnection,
+  args: ListOpenTurnInputAcceptedRowsByThreadIdsArgs,
+): StoredEventRow[] {
+  const threadIds = [...new Set(args.threadIds)];
+  if (threadIds.length === 0) return [];
+  let cache = openTurnInputCaches.get(db);
+  if (cache === undefined) {
+    cache = new Map();
+    openTurnInputCaches.set(db, cache);
+  }
+  const latestSequences = listLatestThreadSequences(db, threadIds);
+  const rows: StoredEventRow[] = [];
+  const uncachedThreadIds: string[] = [];
+  for (const threadId of threadIds) {
+    const entry = cache.get(threadId);
+    const latestSequence = latestSequences.get(threadId) ?? -1;
+    if (
+      entry === undefined ||
+      entry.generation !== getThreadEventStructuralGeneration(threadId) ||
+      entry.throughSequence > latestSequence
+    ) {
+      uncachedThreadIds.push(threadId);
+      continue;
+    }
+    if (entry.throughSequence < latestSequence) {
+      const interruptionSequence = getLatestThreadInterruptionSequence(
+        db,
+        threadId,
+      );
+      const candidates = entry.rows.filter(
+        (row) => row.sequence > interruptionSequence,
+      );
+      const completedTurnIds = listCompletedTurnIds(
+        db,
+        threadId,
+        candidates.flatMap((row) => (row.turnId === null ? [] : [row.turnId])),
+      );
+      entry.rows = [
+        ...candidates.filter(
+          (row) => row.turnId === null || !completedTurnIds.has(row.turnId),
+        ),
+        ...listOpenTurnInputAcceptedRowsByThreadIdsUncached(db, {
+          afterSequence: entry.throughSequence,
+          threadIds: [threadId],
+        }),
+      ];
+      entry.throughSequence = latestSequence;
+    }
+    cache.delete(threadId);
+    cache.set(threadId, entry);
+    rows.push(...entry.rows);
+  }
+  if (uncachedThreadIds.length > 0) {
+    const fresh = listOpenTurnInputAcceptedRowsByThreadIdsUncached(db, {
+      afterSequence: null,
+      threadIds: uncachedThreadIds,
+    });
+    for (const threadId of uncachedThreadIds) {
+      const threadRows = fresh.filter((row) => row.threadId === threadId);
+      cache.delete(threadId);
+      cache.set(threadId, {
+        generation: getThreadEventStructuralGeneration(threadId),
+        rows: threadRows,
+        throughSequence: latestSequences.get(threadId) ?? -1,
+      });
+      rows.push(...threadRows);
+    }
+  }
+  while (cache.size > OPEN_TURN_INPUT_CACHE_MAX_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+  return rows
+    .map((row) => ({ ...row }))
+    .sort(
+      (left, right) =>
+        left.threadId.localeCompare(right.threadId) ||
+        left.sequence - right.sequence,
+    );
 }
 
 export function listStoredClientTurnRequestRowsByKeys(
