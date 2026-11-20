@@ -13,6 +13,7 @@ import {
   getThreadEventRewriteGeneration,
   getThreadEventStructuralGeneration,
   listQueuedThreadMessages,
+  listRunningThreads,
 } from "@bb/db";
 import type { Hono } from "hono";
 import {
@@ -152,6 +153,9 @@ function parseThreadTimelinePage(
   };
 }
 
+const STARTUP_WARM_DELAY_MS = 20_000;
+const STARTUP_WARM_THREAD_LIMIT = 24;
+
 export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
   const { get, patch } = typedRoutes<PublicApiSchema>(app, {
     onValidationError: (msg) => new ApiError(400, "invalid_request", msg),
@@ -257,13 +261,10 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     );
   });
 
-  get(routes.conversationOutline, async (context, query) => {
-    const thread = requirePublicThread(deps.db, context.req.param("id"));
-    const selectItems = (items: ThreadConversationOutlineResponse["items"]) =>
-      query.role === undefined
-        ? items
-        : items.filter((item) => item.role === query.role);
-
+  async function readConversationOutline(thread: Thread): Promise<{
+    items: ThreadConversationOutlineResponse["items"];
+    maxSeq: number;
+  }> {
     const outlineSequence = getLatestStoredConversationOutlineSequence(
       deps.db,
       { threadId: thread.id },
@@ -309,8 +310,54 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
           }).items,
       }),
     });
-    return context.json({ items: selectItems(items), maxSeq });
+    return { items, maxSeq };
+  }
+
+  get(routes.conversationOutline, async (context, query) => {
+    const thread = requirePublicThread(deps.db, context.req.param("id"));
+    const { items, maxSeq } = await readConversationOutline(thread);
+    return context.json({
+      items:
+        query.role === undefined
+          ? items
+          : items.filter((item) => item.role === query.role),
+      maxSeq,
+    });
   });
+
+  if (offThreadTarget !== null) {
+    const warmRunningThreads = async (): Promise<void> => {
+      let running: { id: string }[];
+      try {
+        running = listRunningThreads(deps.db).slice(
+          0,
+          STARTUP_WARM_THREAD_LIMIT,
+        );
+      } catch {
+        return;
+      }
+      for (const { id } of running) {
+        try {
+          const thread = requirePublicThread(deps.db, id);
+          await Promise.all([
+            timelineWindows.readOffThread(
+              thread,
+              {
+                deferContent: true,
+                includeNestedRows: false,
+                page: parseThreadTimelinePage({}),
+              },
+              undefined,
+            ),
+            readConversationOutline(thread),
+          ]);
+        } catch {
+          continue;
+        }
+      }
+    };
+    setTimeout(() => void warmRunningThreads(), STARTUP_WARM_DELAY_MS).unref();
+  }
 
   get(routes.message, (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
