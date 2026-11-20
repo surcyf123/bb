@@ -608,6 +608,31 @@ describe("incremental conversation outlines", () => {
     });
   });
 
+  it("keeps a frozen prefix per thread status across status changes", () => {
+    withTestThread((testThread) => {
+      seed(testThread, 100);
+      const idle: TestThread = {
+        ...testThread,
+        thread: { ...testThread.thread, status: "idle" },
+      };
+      expectMatchesFull(testThread);
+      appendRows(testThread, [
+        message("live", "Final answer"),
+        completed("live"),
+      ]);
+      expectMatchesFull(idle);
+      appendRows(testThread, [started("next"), delta("next", "Next")]);
+      const count = countSelectedEventRows(testThread, () => {
+        load(testThread);
+      });
+      expect(count).toBeLessThan(20);
+      expectMatchesFull(testThread);
+      appendRows(testThread, [message("next", "Done"), completed("next")]);
+      expectMatchesFull(idle);
+      expectMatchesFull(testThread);
+    });
+  });
+
   it.each([
     "rewind",
     "clear",

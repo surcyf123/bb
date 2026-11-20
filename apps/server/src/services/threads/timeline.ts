@@ -2303,6 +2303,7 @@ export function loadThreadConversationOutline(
         items: projectConversationOutlineIncrementally({
           db,
           threadId: thread.id,
+          variant: thread.status,
           key: buildThreadConversationOutlineProjectionKey(
             thread,
             0,

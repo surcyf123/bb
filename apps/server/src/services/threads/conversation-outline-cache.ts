@@ -232,6 +232,7 @@ function nextCheckpoint(
 export function projectConversationOutlineIncrementally(args: {
   db: DbConnection;
   threadId: string;
+  variant: string;
   key: string;
   maxSeq: number;
   historySequenceStart: number;
@@ -253,9 +254,10 @@ export function projectConversationOutlineIncrementally(args: {
   }
   const dataVersion = getDatabaseDataVersion(args.db);
   const generation = getThreadEventStructuralGeneration(args.threadId);
-  const entry = cache.entries.get(args.threadId);
+  const slot = `${args.threadId}\0${args.variant}`;
+  const entry = cache.entries.get(slot);
   if (entry !== undefined) {
-    cache.entries.delete(args.threadId);
+    cache.entries.delete(slot);
     cache.chars -= entry.chars;
   }
   const empty: Checkpoint = {
@@ -333,7 +335,7 @@ export function projectConversationOutlineIncrementally(args: {
             0,
           );
     if (chars <= MAX_CHARS) {
-      cache.entries.set(args.threadId, {
+      cache.entries.set(slot, {
         agentMessageDeltaCount,
         checkpoint: next,
         historySequenceStart: args.historySequenceStart,
